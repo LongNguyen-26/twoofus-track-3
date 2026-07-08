@@ -1,2 +1,23 @@
-*.png
+# macOS archive junk (from extracting BTC zip files)
+__MACOSX/
+._*
+.DS_Store
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Model weights — never commit (keep in HF cache or a local models/ dir)
+models/
+*.safetensors
+*.gguf
+
+# Local scratch
+scratch/
+*.log
+
 /requirements
+/context_support
+*.png
