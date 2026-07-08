@@ -30,15 +30,23 @@ In the sample compose, the `entrypoint` lines and the first four `command` args 
 
 ## The trace (input/trace-round1.jsonl) — analyzed facts
 
-Derived by parsing the file; re-verify with the scripts below if the trace changes.
+Exact numbers from the real Qwen3.5-2B tokenizer + chat template (`python tools/analyze_trace.py`):
 
-- 120 requests = **20 parallel conversations × 6 turns**. Waves at t = 0, 5, 10, 15, 20, 25s; each wave sends the next turn of all 20 conversations.
-- Each request's message list is an **exact string-prefix extension** of that conversation's previous request, and all 120 requests share **one identical ~39k-char (~6.4k-token) system prompt** → prefix caching / keeping conversations resident in KV cache is the dominant optimization. Naive total prefill ≈ 2.4M tokens; with perfect prefix reuse ≈ 0.6M.
-- Prompt sizes: ~11k words (turn 1) → ~23k words (turn 6), ≈ 13k–30k tokens (1.1–1.3 tok/word estimate; not verified with the real tokenizer).
-- Every body: `max_tokens=200`, `temperature=0`, `seed=42`, no `stream` flag (the benchmark harness must measure TTFT its own way — replay with streaming when testing locally).
-- Peak KV residency if all 20 conversations stay cached ≈ 600k tokens — KV dtype (fp8) and `gpu-memory-utilization` decide whether reuse survives on 18GB.
+- 120 requests = **20 parallel conversations × 6 turns**. Waves at t = 0, 5, 10, 15, 20, 25s; each wave sends the next turn of all 20 conversations. Each request is an exact string-prefix extension of that conversation's previous request.
+- Prompt tokens: wave 0 avg 12,949 → wave 5 avg 27,372; absolute max **27,398**. So `--max-model-len=32768` suffices; we use 40960 for margin. Requests longer than max-model-len get HTTP 400 → score 0 (killed submit_001).
+- Shared system prompt: **6,396 tokens**, byte-identical across all 120 requests. Each turn adds ~2,885 tokens.
+- Naive total prefill 2.42M tokens; perfect prefix reuse leaves **426k unique tokens** (5.7× less).
+- Every body: `max_tokens=200`, `temperature=0`, `seed=42`, no `stream` flag (replay with streaming locally to measure TTFT).
+- **Primer**: the harness runs a primer pass before the scored run (submit_001's error text: "primer: 120/120 transport errors"). If the primer replays the same 120 prompts, a server whose prefix cache works and retains everything enters the scored run ~100% warm — the likely explanation for top scores ≈94. **Cache hit rate across primer → scored run is the whole game; TTFT then measures cache lookup, not prefill.**
 
-**Hard requirement**: `--max-model-len` must exceed the longest request (~30k tokens + 200 output). Use ≥ 40960 for safety margin. Requests longer than max-model-len are rejected with HTTP 400 → they score 0.
+## Model architecture (Qwen/Qwen3.5-2B) — from HF config.json
+
+- **Hybrid linear-attention** (Qwen3-Next style), NOT a plain dense transformer: 24 layers = 18 `linear_attention` + **6 `full_attention`** (every 4th). `Qwen3_5ForConditionalGeneration`, multimodal repo (vision tower ships in the 4.55GB BF16 weights); trace is text-only. `max_position_embeddings` 262144.
+- KV cache exists only for the 6 full-attn layers: 2 KV heads × head_dim 256 → **12 KB/token BF16** (6 KB fp8). The 18 linear layers instead keep a **fixed ~21MB fp32 recurrent state per sequence** (`mamba_ssm_dtype: float32`).
+- KV pool on 18GB at util 0.95 with BF16 weights ≈ 11GB → **~900k tokens in BF16**. The full 426k-token working set fits ~2× over **without any quantization** → VRAM capacity is NOT the constraint; whether the serving stack can prefix-cache/checkpoint the hybrid linear state is.
+- Has an **MTP head** (`mtp_num_hidden_layers: 1`) → native speculative decoding for TPOT if the stack supports it for this arch.
+- Working hypothesis for submit_002's 9.17: prefix caching ineffective for this hybrid arch on vLLM v0.22.1 and/or broken by `--kv-cache-dtype=fp8` → every request re-prefilled 13k–27k tokens. Verify on a rented GPU (replay the same request twice; warm TTFT should collapse to ~ms) before trusting any config.
+- Image versions as of 08/07/2026: baseline `vllm/vllm-openai:v0.22.1`; newest stable `vllm/vllm-openai:v0.24.0`, `lmsysorg/sglang:v0.5.14` — newer stacks likely have better Qwen3.5 hybrid support.
 
 ## Repo layout & conventions
 
@@ -57,10 +65,10 @@ Derived by parsing the file; re-verify with the scripts below if the trace chang
 
 ## Useful commands
 
-Analyze the trace (workload mix, arrival waves, prompt growth, prefix sharing):
+Analyze the trace with the real tokenizer (token counts, waves, prefix sharing):
 
 ```powershell
-python -c "import json; rows=[json.loads(l) for l in open(r'input\trace-round1.jsonl', encoding='utf-8')]; print(len(rows), rows[0]['body'].keys())"
+python tools\analyze_trace.py
 ```
 
 Validate a compose file before submitting:
