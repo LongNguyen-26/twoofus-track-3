@@ -61,7 +61,10 @@ Exact numbers from the real Qwen3.5-2B tokenizer + chat template (`python tools/
 
 - **submit_001** (08/07/2026): baseline + `--kv-cache-dtype=fp8`, `--enable-chunked-prefill`, `--max-model-len=8192` → **FAILED**: "primer: 120/120 transport errors — contestant server unscoreable". Cause: max-model-len 8192 < prompt lengths (13k–30k tokens), so vLLM rejected every request. Lesson above.
 - **submit_002** (08/07/2026 05:29): same as 001 but `--max-model-len=40960` → **9.17** (graded OK). Server works; latency near the score floor — TTFT/TPOT mostly ≥ ceilings under 20-way concurrent long prefills. Baseline to beat with prefix-reuse/quantization/scheduler tuning.
+- **submit_003** (08/07/2026 17:52): SGLang v0.5.14 minimal probe → **FAILED**, error text not yet captured (portal list only). Note: sglang v0.5.14 does ship `qwen3_5.py`/`qwen3_5_mtp.py`, so arch support is NOT the cause.
+- **submit_004** (08/07/2026 18:31): vLLM v0.22.1 clean baseline + `--max-model-len=40960` (submit_002 minus kv-fp8/chunked-prefill) → **FAILED**, error text not yet captured. Suspicious: near-identical 002 graded fine the same morning — portal-side flake (e.g. Docker Hub pull limit) is a live hypothesis; do not re-diagnose config until the error text is read.
 - Leaderboard reference (08/07/2026): #1 pipilabu 94.02, #10 61.15.
+- **Daily quota warning**: 4/5 submissions used on 08/07. Never spend the last slot of a day on an undiagnosed failure.
 
 ## Useful commands
 
