@@ -45,7 +45,9 @@ Exact numbers from the real Qwen3.5-2B tokenizer + chat template (`python tools/
 - KV cache exists only for the 6 full-attn layers: 2 KV heads × head_dim 256 → **12 KB/token BF16** (6 KB fp8). The 18 linear layers instead keep a **fixed ~21MB fp32 recurrent state per sequence** (`mamba_ssm_dtype: float32`).
 - KV pool on 18GB at util 0.95 with BF16 weights ≈ 11GB → **~900k tokens in BF16**. The full 426k-token working set fits ~2× over **without any quantization** → VRAM capacity is NOT the constraint; whether the serving stack can prefix-cache/checkpoint the hybrid linear state is.
 - Has an **MTP head** (`mtp_num_hidden_layers: 1`) → native speculative decoding for TPOT if the stack supports it for this arch.
-- Working hypothesis for submit_002's 9.17: prefix caching ineffective for this hybrid arch on vLLM v0.22.1 and/or broken by `--kv-cache-dtype=fp8` → every request re-prefilled 13k–27k tokens. Verify on a rented GPU (replay the same request twice; warm TTFT should collapse to ~ms) before trusting any config.
+- **Verified on pod (battery3, RTX 4090, v0.22.1)**: APC works for this hybrid arch — warm-replay TTFT collapses 1701ms → 44ms; within-run hit rate 67–77%. **With `--kv-cache-dtype=fp8` + `--max-num-seqs=32` the full trace working set survives a whole replay pass: the second pass scores ERS 0.9447 locally (ttft_p50 114ms, tpot_p50 8ms) ≈ leaderboard #1 (94.02).** With bf16 KV the working set does NOT survive (LRU eviction, pass 2 ≈ pass 1) → at ~17GB, fp8 KV is a cache-retention requirement, not an accuracy tradeoff (accuracy_drop 0 on portal).
+- Also verified: `--max-num-batched-tokens=16384` *hurts* TTFT (head-of-line blocking; local E1 < E0 and portal 006 4.59 < 004 14.49 agree) — keep the 2048 default. MTP spec decode (`qwen3_5_mtp`, n=2) *hurts* at 20-way batch (tpot p50 32ms vs 14ms) — parked.
+- Local↔portal calibration: **ordering transfers, absolute numbers don't** (4090 ≈ 4–8× the MiG slice; local cold ERS 0.57 ↔ portal 14.49).
 - Image versions as of 08/07/2026: baseline `vllm/vllm-openai:v0.22.1`; newest stable `vllm/vllm-openai:v0.24.0`, `lmsysorg/sglang:v0.5.14` — newer stacks likely have better Qwen3.5 hybrid support.
 
 ## Repo layout & conventions
@@ -65,9 +67,11 @@ Exact numbers from the real Qwen3.5-2B tokenizer + chat template (`python tools/
 - **submit_004** (08/07/2026 18:31): submit_002 minus kv-fp8/chunked-prefill → **FAILED**: "job exceeded max duration of 2700s with no terminal callback". Initially blamed on config (chunked-prefill theory) — **disproven**: the identical file graded fine the next morning. See timing rule below.
 - **submit_005** (08/07/2026 19:48): submit_002 + `--max-num-batched-tokens=16384` + `--max-num-seqs=32` → **FAILED**: same "2700s no terminal callback", evening window. Config unproven, not invalid — the scheduler-tuning hypothesis is still untested on the portal.
 - **submit_004 re-run** (09/07/2026 03:07): same file as 004 → **14.49**. Metrics: erc 0.7 (passed_slo 84/120), ttft_p50 774ms, ttft_p95 10,205ms, tbt_median 59ms, failed 0, accuracy_drop 0, warmup_count 0. Every metric beats submit_002 (9.17) → `--kv-cache-dtype=fp8` is now suspected of *hurting* latency/cache behavior (accuracy is unaffected; capacity is not needed). APC still not hitting: even with the primer, ttft_p95 10.2s means full re-prefill.
+- **submit_006** (09/07/2026 03:34): 004 + `--enable-chunked-prefill` + `--max-num-batched-tokens=16384` + `--max-num-seqs=32` → **4.59** (graded OK). Metrics: erc 0.1417 (passed_slo 17/120), ttft_p50 **2797ms**, ttft_p95 12791ms, tbt_median 42ms, accuracy_drop 0. Big prefill chunks wreck TTFT on the slow MiG slice (head-of-line blocking) even though tbt improved. Matches local battery ordering (E1 < E0). **Do not ship 16384-token chunks.**
+- **battery3 (pod, 09/07)**: see Model-architecture section — key result: fp8 KV + seqs32 → warm second pass ERS 0.9447 local; bf16 KV loses retention; MTP n=2 harmful; scheduler knobs irrelevant once warm.
 - **Timing rule (3 data points)**: all "2700s no terminal callback" failures were submitted 17:52–19:48 (evening); the same compose passed at 03:07. The hang is BTC-side congestion. **Submit in the early-morning window (~02:00–09:00); never burn slots on the evening peak; a "2700s" failure says nothing about the config.**
 - Leaderboard reference (08/07/2026): #1 pipilabu 94.02, #10 61.15.
-- Daily quota: 5/day (quota day boundary unverified). 09/07: 1 used (004 re-run at 03:07). Never spend the last slot of a day on an undiagnosed failure.
+- Daily quota: 5/day (quota day boundary unverified). 09/07: 2 used (004 re-run 03:07, 006 03:34). Never spend the last slot of a day on an undiagnosed failure.
 
 ## Grading harness facts (decoded from failures)
 
