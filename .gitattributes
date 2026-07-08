@@ -1,0 +1,4 @@
+# Scripts run on Linux pods — keep LF so bash/python never see CRLF
+*.sh text eol=lf
+*.py text eol=lf
+*.yml text eol=lf
