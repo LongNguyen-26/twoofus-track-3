@@ -60,11 +60,18 @@ Exact numbers from the real Qwen3.5-2B tokenizer + chat template (`python tools/
 ## Submission history — append outcomes here
 
 - **submit_001** (08/07/2026): baseline + `--kv-cache-dtype=fp8`, `--enable-chunked-prefill`, `--max-model-len=8192` → **FAILED**: "primer: 120/120 transport errors — contestant server unscoreable". Cause: max-model-len 8192 < prompt lengths (13k–30k tokens), so vLLM rejected every request. Lesson above.
-- **submit_002** (08/07/2026 05:29): same as 001 but `--max-model-len=40960` → **9.17** (graded OK). Server works; latency near the score floor — TTFT/TPOT mostly ≥ ceilings under 20-way concurrent long prefills. Baseline to beat with prefix-reuse/quantization/scheduler tuning.
-- **submit_003** (08/07/2026 17:52): SGLang v0.5.14 minimal probe → **FAILED**, error text not yet captured (portal list only). Note: sglang v0.5.14 does ship `qwen3_5.py`/`qwen3_5_mtp.py`, so arch support is NOT the cause.
-- **submit_004** (08/07/2026 18:31): vLLM v0.22.1 clean baseline + `--max-model-len=40960` (submit_002 minus kv-fp8/chunked-prefill) → **FAILED**, error text not yet captured. Suspicious: near-identical 002 graded fine the same morning — portal-side flake (e.g. Docker Hub pull limit) is a live hypothesis; do not re-diagnose config until the error text is read.
+- **submit_002** (08/07/2026 05:29): same as 001 but `--max-model-len=40960` → **9.17** (graded OK). Portal metrics: erc 0.5917 (passed_slo 71/120), ttft_p50 964ms, ttft_p95 **13,243ms**, tbt_median **70ms**, failed 0, **accuracy_drop 0** (⇒ kv fp8 is GPQA-safe here), penalty 1. Diagnosis: v0.22.1 defaults `max_num_batched_tokens=2048`, `max_num_seqs=128` → a 20×13k-token wave needs 100+ prefill steps (p95 TTFT 13s), and decode at 70ms/token puts s_tpot≈0 for nearly all requests.
+- **submit_003** (08/07/2026 17:52): SGLang v0.5.14 → **FAILED**: container "inference" ran `/usr/bin/python3: No module named 'vllm'`. **The harness overrides/enforces the entrypoint `python3 -m vllm.entrypoints.openai.api_server`** (and renames the container "inference") regardless of what the compose says → any non-vLLM image dies at spawn. SGLang v0.5.14 does ship qwen3_5 support; irrelevant given the enforcement. Framework switch would need a custom image exposing that exact module path (rule-gray — ask the forum first).
+- **submit_004** (08/07/2026 18:31): submit_002 minus kv-fp8/chunked-prefill → **FAILED**: "job exceeded max duration of 2700s with no terminal callback" — no crash; the run *hung*. Working hypothesis: on v0.22.1 this hybrid arch does NOT default-enable chunked prefill, so without the explicit flag, 13k–27k-token prompts can never fit the 2048-token scheduling budget → requests queue forever. Rule: **on the vLLM route always keep `--enable-chunked-prefill` explicit and set `--max-num-batched-tokens` explicitly.**
 - Leaderboard reference (08/07/2026): #1 pipilabu 94.02, #10 61.15.
-- **Daily quota warning**: 4/5 submissions used on 08/07. Never spend the last slot of a day on an undiagnosed failure.
+- Daily quota: 5/day. Never spend the last slot of a day on an undiagnosed failure.
+
+## Grading harness facts (decoded from failures)
+
+- Harness spawns the contestant compose as pod with container name "inference", **forcing entrypoint `python3 -m vllm.entrypoints.openai.api_server`**; your image must contain that module.
+- Whole grading job (primer + scored run + GPQA) has a **2700s hard cap**; a hung server = "no terminal callback" failure, not a crash log.
+- Result page metrics: `erc` = passed_slo/120, `ers` (=final score pre-penalty), `penalty` = f(Δ), `passed_slo`, `ttft_p50_ms/p95_ms`, `tbt_median_ms` (inter-token time), `failed_count`, `warmup_count`, `accuracy_drop`.
+- MTP speculative decoding for this model is natively supported from v0.22.1 onward (`speculative-config` method `qwen3_5_mtp`, per vLLM source `vllm/config/speculative.py`).
 
 ## Useful commands
 
