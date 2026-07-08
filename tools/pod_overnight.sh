@@ -81,24 +81,40 @@ wait_health() {
 }
 
 stop_server() {
-  # Kill ONLY this test server's process group (never the keepalive on 8000),
-  # then wait until the GPU frees back down to roughly the keepalive footprint,
-  # otherwise the next config boots with ~17GB still held and OOMs.
-  [ -z "$SERVER_PID" ] && return
-  kill -TERM -"$SERVER_PID" 2>/dev/null
-  for i in $(seq 1 30); do
-    kill -0 -"$SERVER_PID" 2>/dev/null || break
-    sleep 2
-    [ "$i" -eq 15 ] && kill -9 -"$SERVER_PID" 2>/dev/null
-  done
-  SERVER_PID=""
+  # Self-healing teardown. Runs even with no tracked SERVER_PID so it also
+  # clears orphans left by an earlier crashed run.
+
+  # 1) kill this test server's process group, if we launched one
+  if [ -n "$SERVER_PID" ]; then
+    kill -TERM -"$SERVER_PID" 2>/dev/null
+    for i in $(seq 1 20); do
+      kill -0 -"$SERVER_PID" 2>/dev/null || break
+      sleep 1
+      [ "$i" -eq 10 ] && kill -9 -"$SERVER_PID" 2>/dev/null
+    done
+    SERVER_PID=""
+  fi
+
+  # 2) the vLLM V1 EngineCore has no model path in its cmdline, so pattern
+  #    kills miss it. Kill it by GPU footprint instead: anything using >5GB is
+  #    a leftover test engine; the keepalive (0.6B) sits ~3.5GB and is spared.
+  local hogs
+  hogs=$(nvidia-smi --query-compute-apps=pid,used_memory --format=csv,noheader,nounits \
+         | tr -d ',' | awk '$2>5000{print $1}')
+  [ -n "$hogs" ] && kill -9 $hogs 2>/dev/null
+
+  # 3) free our port too, in case an APIServer is still bound to it
+  local pport
+  pport=$(ss -ltnHp "sport = :${PORT}" 2>/dev/null | grep -oP 'pid=\K[0-9]+')
+  [ -n "$pport" ] && kill -9 $pport 2>/dev/null
+
+  # 4) wait for the GPU to settle back down to roughly the keepalive footprint
   for i in $(seq 1 30); do
     used=$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits | head -1)
-    # keepalive (0.6B @ util 0.1) holds ~2.5GB; wait until only that remains
     [ "${used:-99999}" -lt 5000 ] && break
     sleep 2
   done
-  echo "  gpu freed (${used:-?} MiB still used)"
+  echo "  gpu now ${used:-?} MiB used (keepalive only if ~3500)"
 }
 
 run_cfg() {
