@@ -1,12 +1,25 @@
 #!/usr/bin/env bash
 # Overnight experiment battery for the Viettel AI Race pod (RunPod RTX 4090).
 #
+# HOST DRIVER REQUIREMENT: vllm/vllm-openai:v0.22.1 is built on CUDA 13.0, so
+# the RunPod host needs driver R580+ (CUDA >= 13.0). Cheap 4090 hosts on older
+# drivers fail at container init with "nvidia-container-cli: unsatisfied
+# condition: cuda>=13.0". On deploy, use Filter -> CUDA Version >= 13.0.
+#
 # Runs each vLLM config in turn, simulating the MiG H200 eval slice
 # (18GB VRAM cap via --gpu-memory-utilization, 3 CPU cores via taskset),
 # and for each: prints cold-vs-warm TTFT (prefix-cache probe) + a full
 # 2-pass replay (primer + scored) with local ERS.
 #
-# PREREQ (run once in the pod Web Terminal before this script):
+# KEEPALIVE: the vllm image's entrypoint IS the server, so the container can't
+# host a shell on its own. Set the pod's Container Start Command to a tiny
+# keepalive server so the container stays up and Web Terminal can attach:
+#   --model Qwen/Qwen3-0.6B --host 0.0.0.0 --port 8000 \
+#       --gpu-memory-utilization 0.1 --max-model-len 2048
+# That keepalive owns port 8000; THIS script runs the real configs on port 8001
+# as children in its own process group, so it never kills the keepalive (PID 1).
+#
+# PREREQ (run once in the pod Web Terminal, after keepalive is Ready):
 #   cd /workspace
 #   git clone https://github.com/LongNguyen-26/twoofus-track-3.git repo && cd repo
 #   pip install -U huggingface_hub hf_transfer aiohttp
@@ -20,12 +33,16 @@
 
 set -uo pipefail
 
+# The RunPod template may inject VLLM_API_KEY into the container env; a test
+# server inheriting it would 401 every request (exactly what a stale run saw).
+unset VLLM_API_KEY
+
 MODEL=/workspace/model
-PORT=8000
+PORT=8001                         # 8000 is held by the keepalive server (PID 1)
 URL="http://localhost:${PORT}"
 OUT="results_$(date +%Y%m%d_%H%M%S)"
 mkdir -p "$OUT"
-SERVER_PID=""
+SERVER_PID=""                     # process-group leader of the current test server
 
 # Flags shared by every config — ONLY the ones that mimic the eval box or are
 # hard requirements (see CLAUDE.md):
@@ -64,17 +81,21 @@ wait_health() {
 }
 
 stop_server() {
-  # Kill and wait until the GPU is actually free, otherwise the next config
-  # boots while ~17GB are still allocated and OOMs for the wrong reason.
-  pkill -f vllm.entrypoints.openai.api_server 2>/dev/null
+  # Kill ONLY this test server's process group (never the keepalive on 8000),
+  # then wait until the GPU frees back down to roughly the keepalive footprint,
+  # otherwise the next config boots with ~17GB still held and OOMs.
+  [ -z "$SERVER_PID" ] && return
+  kill -TERM -"$SERVER_PID" 2>/dev/null
   for i in $(seq 1 30); do
-    pgrep -f vllm.entrypoints.openai.api_server >/dev/null || break
+    kill -0 -"$SERVER_PID" 2>/dev/null || break
     sleep 2
-    [ "$i" -eq 15 ] && pkill -9 -f vllm.entrypoints.openai.api_server 2>/dev/null
+    [ "$i" -eq 15 ] && kill -9 -"$SERVER_PID" 2>/dev/null
   done
+  SERVER_PID=""
   for i in $(seq 1 30); do
     used=$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits | head -1)
-    [ "${used:-99999}" -lt 2000 ] && break
+    # keepalive (0.6B @ util 0.1) holds ~2.5GB; wait until only that remains
+    [ "${used:-99999}" -lt 5000 ] && break
     sleep 2
   done
   echo "  gpu freed (${used:-?} MiB still used)"
@@ -90,15 +111,32 @@ run_cfg() {
 
   stop_server
 
+  # Refuse to run if something already answers on our port — otherwise the
+  # health check "passes" instantly and we benchmark the wrong server.
+  if curl -sf "${URL}/health" >/dev/null 2>&1; then
+    echo "  !! port ${PORT} already answering /health (stale server?) — aborting battery"
+    exit 1
+  fi
+
+  # setsid puts the server in its own process group so stop_server can kill it
+  # (and its vLLM worker children) without touching the keepalive on port 8000.
   # 3-core CPU cap mimics the eval slice; server log captured for grepping
   # (look for 'prefix', 'chunked', 'not supported', 'speculative').
-  taskset -c 0-2 python3 -m vllm.entrypoints.openai.api_server \
+  setsid taskset -c 0-2 python3 -m vllm.entrypoints.openai.api_server \
     "${COMMON[@]}" "$@" > "${OUT}/server_${name}.log" 2>&1 &
   SERVER_PID=$!
 
   if ! wait_health; then
     echo "  --> skipping benchmark for ${name} (see ${OUT}/server_${name}.log)"
     tail -n 30 "${OUT}/server_${name}.log"
+    stop_server
+    return
+  fi
+
+  # Identity check: make sure the thing answering on $PORT is OUR model,
+  # not the keepalive or a stale server.
+  if ! curl -s "${URL}/v1/models" | grep -q '"Qwen3.5-2B"'; then
+    echo "  !! server on ${PORT} is not serving Qwen3.5-2B — see ${OUT}/server_${name}.log"
     stop_server
     return
   fi
