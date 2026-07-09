@@ -26,10 +26,20 @@ QUANT=${QUANT:-1}
 
 # ---- 1. install the patch into this pod's python (mirrors the Dockerfile) ---
 SP=$(python3 -c "import site; print(site.getsitepackages()[0])")
-cp image/vllm_exact_cache.py "$SP/vllm_exact_cache.py"
-cp image/sitecustomize.py    "$SP/sitecustomize.py"
-python3 -c "import vllm_exact_cache" || { echo "patch import FAILED"; exit 1; }
-echo "patch installed into $SP"
+cp image/vllm_exact_cache.py      "$SP/vllm_exact_cache.py"
+cp image/vllm_exact_cache_boot.py "$SP/vllm_exact_cache_boot.py"
+cp image/exact_cache.pth          "$SP/exact_cache.pth"
+cp image/sitecustomize.py         "$SP/sitecustomize.py"
+python3 -c "import vllm_exact_cache_boot" || { echo "patch import FAILED"; exit 1; }
+# The .pth is the real mechanism: confirm it auto-runs at interpreter startup
+# (this is exactly what failed before — sitecustomize was shadowed).
+if ! python3 -c "pass" 2>&1 | grep -q "exact-cache] FastAPI autopatch installed"; then
+  echo "!! .pth autoloader did NOT run at startup — patch would not load in the server"
+  echo "   sys.path / sitecustomize diagnostics:"
+  python3 -c "import site,sys; print('getsitepackages:', site.getsitepackages()); print('sys.path[:6]:', sys.path[:6])"
+  exit 1
+fi
+echo "patch installed into $SP and .pth autoload confirmed"
 
 wait_health() {
   echo "  waiting for /health (pid ${SERVER_PID}) ..."
