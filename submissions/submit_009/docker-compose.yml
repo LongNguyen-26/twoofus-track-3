@@ -1,0 +1,30 @@
+# NOTE: replace YOUR_DOCKERHUB_USER with the real Docker Hub username after
+# `docker push`. The image must be PUBLIC. Everything else is submit_008's
+# proven config (17.07) — the cache image only adds the response-cache layer.
+services:
+  model:
+    image: YOUR_DOCKERHUB_USER/qwen35-cache:v1
+    entrypoint:
+      - python3 #Don't change this to vllm-server
+      - -m  #Don't change this to vllm-server
+      - vllm.entrypoints.openai.api_server #Don't change this to vllm-server
+    command:
+      - --model=/model #Don't change this to vllm-server
+      - --served-model-name=Qwen3.5-2B #Don't change this to vllm-server
+      - --host=0.0.0.0 #Don't change this to vllm-server
+      - --port=8000 #Don't change this to vllm-server
+      - --max-model-len=40960
+      - --gpu-memory-utilization=0.95
+      - --tensor-parallel-size=1
+      - --enable-prefix-caching
+      - --quantization=fp8
+    ports:
+      - "8000:8000"
+    shm_size: "2g"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
