@@ -3,7 +3,7 @@
 # proven config (17.07) — the cache image only adds the response-cache layer.
 services:
   model:
-    image: YOUR_DOCKERHUB_USER/qwen35-cache:v1
+    image: nguyenlong26/qwen35-cache:v1
     entrypoint:
       - python3 #Don't change this to vllm-server
       - -m  #Don't change this to vllm-server
