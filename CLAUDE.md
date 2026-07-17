@@ -4,11 +4,87 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this repo is
 
-Competition workspace for **Viettel AI Race 2026 — LLM Inference Optimization Challenge**, Phase 1 (Vòng 1 Sơ loại, 02/07–30/07/2026). There is no application code, build, lint, or test suite. The deliverable is a `docker-compose.yml` submitted to the organizer's (BTC) portal; it must reference a **public Docker Hub image** that serves **Qwen/Qwen3.5-2B** as an OpenAI-compatible endpoint. BTC pulls the image, runs it on their hardware, and benchmarks it against a fixed trace.
+Competition workspace for **Viettel AI Race 2026 — LLM Inference Optimization Challenge**, Phase 1 (Vòng 1 Sơ loại, 02/07–30/07/2026). There is no application code, build, lint, or test suite. The deliverable is a `docker-compose.yml` submitted to the organizer's (BTC) portal referencing a **public Docker Hub image** served with vLLM. BTC pulls the image, runs it on their hardware, and benchmarks it against a fixed trace.
+
+**On 16/07/2026 BTC "upgraded" the problem (round 2 of Phase 1) and reset the leaderboard.** Everything in the ROUND 2 section below is current; sections further down describe round 1 (Qwen3.5-2B) and are kept as history/lessons — the harness behavior, timing rules, and portal mechanics they document mostly still apply, but the model, trace, scoring constants, and GPQA process have all changed.
 
 Communicate with the user in Vietnamese (English technical terms are fine).
 
-## Evaluation environment (fixed by BTC)
+## ROUND 2 (16/07/2026 → …) — current problem
+
+Requirements scrape: `requirements/phase1_round2_requirements.txt`. Trace: `input_part2/trace_grading_public.jsonl` (analyze with `python tools/analyze_trace_r2.py`).
+
+### What changed vs round 1
+
+- **Model: `LiquidAI/LFM2.5-1.2B-Instruct`** (was Qwen3.5-2B). Served name must be `LFM2.5-1.2B-Instruct`, port 8000, weights mounted at `/model`.
+- **Framework locked to vLLM** ("Thí sinh chỉ được phép sử dụng serving framework vLLM") — version NOT pinned; baseline image is still `vllm/vllm-openai:v0.22.1`. Sample compose keeps the same 4 "don't change" args + now ships `--max-model-len=32768 --gpu-memory-utilization=0.95 --tensor-parallel-size=1 --enable-prefix-caching` as tunable defaults.
+- **Scoring constants massively tightened**: `s_ttft = clamp((400 − TTFT)/390, 0, 1)²` (floor 10ms, ceiling 400ms; was 100/1500), `s_tpot = clamp((10 − TPOT)/9, 0, 1)²` (floor 1ms, ceiling 10ms; was 20/45). w=0.5, γ=2 unchanged. Errors/timeout/0-token → 0.
+- **GPQA moved to post-online audit**: online submissions are graded on **ERS only** (leaderboard = ERS). After the online round each team hand-picks ≤5 submissions; BTC first audits validity ("hậu kiểm tính hợp lệ phương án"), then runs GPQA full (lm_eval / bench-gpqa-diamond.sh). Final `Score = 100 × ERS × f(Δ)`, f as before (Δ≤0.10 free, 0 at Δ≥0.16, baseline BF16 = 0.4; the HF model card reports GPQA 38.89 ≈ matches). Team score = best valid submission.
+- **Anti-cheat explicitly bans**: pre-bake/hardcode results, **dual-path mechanisms / gaming the measurement**, external network calls, tampering with tokenizer/weights, swapping the image post-submit. Combined with the manual audit of final picks, **the round-1 exact-match response cache is dead**: it would (a) never hit anyway (see trace) and (b) risk disqualification at audit. Ship clean vLLM configs only.
+- **Tie-break now published** (applies within 1–2 point noise band): ① smaller accuracy drop → ② p95 TTFT → ③ generation speed → ④ earlier submission time. Earlier-submission tie-break rewards submitting good configs EARLY.
+- Host: Ubuntu 24.04, driver 590.x (CUDA 13) — CUDA 12.x images still fine. Healthcheck 600s, 5 submissions/day unchanged. Re-grading: BTC may re-run a finalist image several times and take the **median**.
+
+### Round-2 trace facts (from `tools/analyze_trace_r2.py`)
+
+Public trace is **prompt-stripped** (BTC keeps the real prompts): only `conv_id, turn_idx, in_warmup, timestamp_ms, think_ms, in_chars, in_tokens_est, out_tokens_max` per row. 420 rows total:
+
+- **15 warmup conversations** (`in_warmup: true`, NOT scored) arriving t=0..41s, then **55 scored conversations** arriving t=46..303s (Poisson, mean gap ≈ 4.75s, min 33ms). 70 convos × 6 turns each; 330 scored requests.
+- **Closed-loop multi-turn**: turn 0 arrives at `timestamp_ms`; each later turn arrives `think_ms = 3000` after the previous turn's response completes. Server speed shifts later turns.
+- **Every request ≈ 4,000 input tokens (~12,000 chars), flat across turns** (4000 → 3998, NOT growing like round 1) and `out_tokens_max = 200` always. Prompts appear cut to exactly ≤12,000 chars → likely sliding-window/truncate-from-start conversation context. **If truncation drops the head, turn-to-turn prefix caching will MISS** (prefix no longer byte-stable); whether any prefix is shared (system prompt, doc context) is unknowable from the public file — must be measured on the portal, not assumed. Keep `--enable-prefix-caching` on regardless (harmless).
+- Concurrency is LOW: simulated at 1–2s service time → peak ~6 in flight, average 1–2 (vs round 1's 20-way waves). **Per-request latency, not throughput, is what scores.** Scored makespan ≈ 260–300s; whole run ≈ 6 min — far inside the 2700s job cap.
+- Total scored prefill ≈ 1.32M tokens naive; KV pool on 18GB with 2.4GB weights ≈ 1M+ tokens (12KB/token BF16, same 6-full-attn-layer × 8 KV-head × 64 head-dim geometry as round 1) → capacity is a non-issue; fp8 KV unnecessary (and round 1 showed it costs latency).
+
+### Model: LFM2.5-1.2B-Instruct (from HF config, verified)
+
+- `Lfm2ForCausalLM` / model_type `lfm2` — **same architecture class as LFM2** (released 28/11/2025; extended pretraining + RL on the LFM2 backbone). 1.17B params, BF16 ≈ 2.35GB, tie_word_embeddings, vocab 65,536, context 32k (config says 128k max_position).
+- 16 layers = **10 double-gated ShortConv (L_cache=3) + 6 GQA full-attention** (idx 2,5,8,10,12,14; 32 Q heads, 8 KV heads, head_dim 64). Conv state ≈ 120KB/seq — trivial (vs Qwen3.5's 21MB/seq).
+- **vLLM v0.22.1 has `Lfm2ForCausalLM` registered** (checked source: uses ShortConv + mamba state-copy infra, `IsHybrid`, `SupportsQuant`) → baseline image should load it. The vLLM recipes page says "vLLM ≥ 0.23.0" for LFM2.5 — treat as a soft warning; **verify on a pod before burning a submission**.
+- vLLM v0.25.0 (11/07/2026) added **prefix caching for Mamba/hybrid models (alignment-based)** + spec-decode fixes for hybrid archs + Model Runner V2 hybrid support; v0.25.1 (14/07) is latest. A newer image is a serious candidate if v0.22.1's APC doesn't checkpoint ShortConv state.
+- No MTP head in config → speculative decoding options are **ngram / suffix / draft-model**, not native MTP. Draft weights would have to be baked into the image (external downloads banned).
+
+### Score math (round 2 constants) — what latency buys
+
+| TTFT | s_ttft |   | TPOT | s_tpot |
+|------|--------|---|------|--------|
+| 50ms | 0.805 | | 1.5ms | 0.892 |
+| 100ms | 0.592 | | 2ms | 0.790 |
+| 124ms | 0.500 | | 3ms | 0.605 |
+| 150ms | 0.411 | | 3.6ms | 0.500 |
+| 200ms | 0.263 | | 5ms | 0.309 |
+| 400ms | 0 | | 10ms | 0 |
+
+MiG slice envelope (≈1/7 H200: ~600GB/s, ~120–140 TFLOPS BF16): decode is weight-bandwidth-bound → **BF16 ≈ 4–5ms/token (s_tpot ≈ 0.3), FP8 weights ≈ 2–3ms/token (s_tpot ≈ 0.6–0.8)** → `--quantization=fp8` is near-mandatory for TPOT; 4k-token prefill ≈ 70–150ms compute (s_ttft ≈ 0.4–0.6), so TTFT hinges on prefill speed + queueing + any APC hits. Realistic ceiling ≈ 85–90 ERS with spec decode + fp8 + everything tuned; ~55–65 with fp8 + defaults. 100 is unreachable (floors: 10ms TTFT / 1ms TPOT).
+
+### Round-2 submission history — append outcomes here
+
+- **submit_011** (16/07/2026 23:19): BTC sample compose verbatim (v0.22.1, bf16) → **43.36**. ttft_p50 98ms, ttft_p95 150ms, tbt_median 5ms, failed 0, total 330, warmup_count **90** (the 15 warmup convs are recognized and excluded — matches the trace), accuracy_drop/f_delta/penalty shown as 0/1/1 (placeholders; GPQA is post-online now). Proves: v0.22.1 serves LFM2.5 fine; harness works like round 1 (same compose contract); late-evening 23:19 grading is safe.
+- **submit_012** (17/07/2026 07:21): 011 + `--quantization=fp8` → **54.11** (+10.75). ttft_p50 85ms, p95 128ms, tbt_median 4ms. fp8 weights again a pure win on the slice.
+- **submit_013** (17/07/2026 07:32): 012 on image `vllm/vllm-openai:v0.25.1` → **58.68** (+4.57). ttft_p50 **66ms**, p95 **88ms**, tbt_median 4ms. The new image's gain is all TTFT (66 vs 85; p95 88 vs 128) — consistent with the v0.25 hybrid-APC/runner improvements. Sanity check: `0.5·s_ttft(66) + 0.5·s_tpot(4) = 0.589` ≈ portal ERS 58.68 → the portal TTFT/TPOT stats fully explain the score; our score model is calibrated.
+- **Where the points are (after 013)**: s_ttft ≈ 0.73 (TTFT 66ms), s_tpot ≈ 0.44 (TPOT ~4ms). **TPOT is the big remaining hole**: 4→2ms ⇒ +17 points (~75 total); 4→1.5ms ⇒ +22 (~81). TTFT 66→40ms ⇒ only +6. Priority: speculative decoding (ngram/suffix), full CUDA graphs, async scheduling — then TTFT trimming.
+- Quota note: 011 burned on 16/07; 012+013 on 17/07 morning → 3 submissions left for 17/07.
+
+### Round-2 next candidates (pod-verify first, then submit)
+
+- `--speculative-config` ngram / suffix (no draft weights needed; external downloads are banned so a draft model would have to be baked into a custom image — avoid unless ngram/suffix underdeliver).
+- `--compilation-config '{"cudagraph_mode":"FULL_AND_PIECEWISE"}'` — at batch 1–6 with a 1.2B model, per-step host overhead is likely a large TPOT fraction.
+- `--async-scheduling` (v0.24+).
+- Chunked-prefill size sweep (default 2048 vs 4096: low concurrency changes the round-1 calculus, but round 1 proved 16384 is toxic under load).
+- BF16 twin of the best config — tie-break criterion #1 is accuracy drop.
+- **Final-5 selection (end of round)**: must self-run GPQA (lm_eval gpqa_diamond) on a pod for every candidate config since the portal no longer reports accuracy_drop; pick best-ERS configs whose measured Δ ≤ 0.10, and include one BF16 config as tie-break insurance.
+
+Open questions: does APC hit on the real prompts (public trace hides them — compare shared vs fresh replay ERS against the portal number); are bodies still `temperature=0` (assumed); is a newer vLLM image formally fine as "vLLM" (58.68 graded OK ⇒ de-facto yes, watch the forum).
+
+### Pod experiment protocol (round 2)
+
+Same RunPod pattern as round 1 (`tools/pod_overnight.sh` header documents it): deploy `vllm/vllm-openai:v0.25.1` with the tiny-model keepalive as Container Start Command, filter hosts CUDA ≥ 13.0, clone the repo into `/workspace/repo`, download `LiquidAI/LFM2.5-1.2B-Instruct` to `/workspace/model`, then run **`bash tools/pod_battery_r2.sh`** (configs R0–R7: fp8 baseline, ngram, suffix, full-cudagraph, async-sched, chunk4096, bf16, combo; MiG sim = 3 cores via taskset + VRAM capped to 17.1GB via computed gpu-memory-utilization).
+
+Replay is **`tools/replay_r2.py`**: synthetic prompts sized in real tokenizer tokens (prompts are withheld by BTC), arrival `timestamp_ms` + closed-loop `think_ms=3000`, streaming TTFT/TPOT, round-2 scoring constants, warmup rows sent but excluded. Two seeded prompt regimes bracket reality: `--mode shared` (per-conv common prefix ≈ 3.9k tokens → APC best case) and `--mode fresh` (new 4k tokens every turn → APC worst case); the portal number lands between. Compare turn-0 vs turn-1..5 TTFT p50 in the output to see APC working. Local↔portal: ordering transfers, absolutes don't (round-1 lesson; 4090 ≈ 4–8× the slice).
+
+---
+
+# ROUND 1 HISTORY (Qwen3.5-2B, 02/07–16/07/2026) — legacy reference from here down
+
+## Evaluation environment (round 1 — legacy; round 2 differs only in OS/driver)
 
 - 1× MiG H200 instance: **18GB VRAM, 3 CPU cores, 8GB RAM**, Ubuntu 22.04, CUDA 12.x
 - Model weights are provided by BTC (fixed HF hash) mounted at `/model`; served model name must be `Qwen3.5-2B` on port 8000
@@ -18,7 +94,7 @@ Communicate with the user in Vietnamese (English technical terms are fine).
 
 In the sample compose, the `entrypoint` lines and the first four `command` args (`--model=/model`, `--served-model-name=Qwen3.5-2B`, `--host=0.0.0.0`, `--port=8000`) are marked `#Don't change this to vllm-server` — keep them verbatim when using the vLLM image; tune everything after them. Rules allow any framework (vLLM, SGLang, TensorRT-LLM, custom), but how the "don't change" constraint applies outside vLLM is unverified — check the forum before switching.
 
-## Scoring
+## Scoring (round 1 — legacy constants)
 
 `Score = 100 × ERS × f(Δ)`
 
@@ -28,7 +104,7 @@ In the sample compose, the `entrypoint` lines and the first four `command` args 
   - γ=2 makes the curve quadratic: latency near the ceiling is punished hard.
 - **Accuracy gate f(Δ)**: 100 fixed GPQA Diamond questions vs BF16 reference accuracy 0.4. `Δ = 0.4 − team_accuracy`. `f = 1.0` if Δ ≤ 0.10 (i.e. GPQA ≥ 0.30 costs nothing), linear from 1→0 over 0.10 < Δ < 0.16, `f = 0` if Δ ≥ 0.16. Aggressive quantization is viable but a GPQA drop below 0.24 zeroes the entire score.
 
-## The trace (input/trace-round1.jsonl) — analyzed facts
+## The trace (input/trace-round1.jsonl) — round 1, legacy
 
 Exact numbers from the real Qwen3.5-2B tokenizer + chat template (`python tools/analyze_trace.py`):
 
@@ -39,7 +115,7 @@ Exact numbers from the real Qwen3.5-2B tokenizer + chat template (`python tools/
 - Every body: `max_tokens=200`, `temperature=0`, `seed=42`, no `stream` flag (replay with streaming locally to measure TTFT).
 - **Primer**: the harness sends a 120-request primer pass before the scored run (submit_001: "primer: 120/120 transport errors"). **Portal-disproven (submit_007)**: the primer does NOT leave the vLLM KV/prefix cache warm for the scored run — the config that locally scores 0.9447 on a warm second pass scored 1.52 on the portal, and every graded run shows warmup_count 0 with cold-like TTFT. The scored run must be treated as **cold**. Top scores ≈94 are therefore most plausibly a **response/semantic cache in a custom runtime** (đề explicitly allows "Semantic caching"; bodies are deterministic: temperature=0, seed=42, byte-identical between primer and scored run) — see strategy note below.
 
-## Model architecture (Qwen/Qwen3.5-2B) — from HF config.json
+## Model architecture (Qwen/Qwen3.5-2B) — round 1, legacy
 
 - **Hybrid linear-attention** (Qwen3-Next style), NOT a plain dense transformer: 24 layers = 18 `linear_attention` + **6 `full_attention`** (every 4th). `Qwen3_5ForConditionalGeneration`, multimodal repo (vision tower ships in the 4.55GB BF16 weights); trace is text-only. `max_position_embeddings` 262144.
 - KV cache exists only for the 6 full-attn layers: 2 KV heads × head_dim 256 → **12 KB/token BF16** (6 KB fp8). The 18 linear layers instead keep a **fixed ~21MB fp32 recurrent state per sequence** (`mamba_ssm_dtype: float32`).
@@ -52,8 +128,8 @@ Exact numbers from the real Qwen3.5-2B tokenizer + chat template (`python tools/
 
 ## Repo layout & conventions
 
-- `input/` — organizer-provided files (trace, baseline compose). Tracked in git.
-- `submissions/submit_NNN/` — one dir per portal submission: the exact `docker-compose.yml` sent, plus a screenshot of the portal result (screenshots are git-ignored, local only — record the outcome as text in this file instead). Never edit an old submission dir; create the next `submit_NNN`.
+- `input/` — round-1 organizer files; `input_part2/` — round-2 public trace. Tracked in git.
+- `submissions/round_1/submit_001..010`, `submissions/round_2/submit_011...` — one dir per portal submission: the exact `docker-compose.yml` sent, plus a screenshot of the portal result (screenshots are git-ignored, local only — record the outcome as text in this file instead). Never edit an old submission dir; create the next `submit_NNN` (numbering is global across rounds).
 - `requirements/` — scraped competition pages (đề bài, scoring formulas). **Git-ignored, exists only on this machine**; the portal is the source of truth.
 - `context_support/` — reference notes (e.g. RunPod GPU prices). Also git-ignored, local only.
 - `.gitignore` deliberately blocks model weights (`*.safetensors`, `models/`) — never commit weights.
@@ -85,7 +161,7 @@ Exact numbers from the real Qwen3.5-2B tokenizer + chat template (`python tools/
 - **Leaderboard semantics (inferred, not confirmed)**: best-of-all-submissions — across the 08/07 vs 09/07 leaderboard snapshots every team's score only went up despite widespread bad submissions. Confirm via own history if it ever matters. **Tie-break rules unknown** — check Thể lệ / ask the forum neutrally before any tie-motivated submission.
 - **submit_010 (drafted, NOT submitted)**: 009 minus `--quantization=fp8` (native BF16 → expected accuracy_drop 0, but GPQA has run-to-run noise: 008 fp8 scored drop 0, 009 fp8 scored drop 2). Pure accuracy-hedge for a hypothetical accuracy-based tie-break; score stays 100 either way since f(Δ)=1 at Δ≤0.10. Submit only after confirming best-of semantics + tie-break relevance, in the morning window; same public image, so no new exposure surface.
 
-## Grading harness facts (decoded from failures)
+## Grading harness facts (decoded from round-1 failures; re-verify on round 2)
 
 - Harness spawns the contestant compose as pod with container name "inference", **forcing entrypoint `python3 -m vllm.entrypoints.openai.api_server`**; your image must contain that module.
 - Whole grading job (primer + scored run + GPQA) has a **2700s hard cap**; a hung server = "no terminal callback" failure, not a crash log.
@@ -94,7 +170,13 @@ Exact numbers from the real Qwen3.5-2B tokenizer + chat template (`python tools/
 
 ## Useful commands
 
-Analyze the trace with the real tokenizer (token counts, waves, prefix sharing):
+Analyze the round-2 trace (arrivals, turns, concurrency sim):
+
+```powershell
+python tools\analyze_trace_r2.py
+```
+
+Analyze the round-1 trace with the real tokenizer (token counts, waves, prefix sharing):
 
 ```powershell
 python tools\analyze_trace.py
