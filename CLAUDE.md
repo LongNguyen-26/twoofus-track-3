@@ -62,17 +62,16 @@ MiG slice envelope (≈1/7 H200: ~600GB/s, ~120–140 TFLOPS BF16): decode is we
 - **submit_013** (17/07/2026 07:32): 012 on image `vllm/vllm-openai:v0.25.1` → **58.68** (+4.57). ttft_p50 **66ms**, p95 **88ms**, tbt_median 4ms. The new image's gain is all TTFT (66 vs 85; p95 88 vs 128) — consistent with the v0.25 hybrid-APC/runner improvements. Sanity check: `0.5·s_ttft(66) + 0.5·s_tpot(4) = 0.589` ≈ portal ERS 58.68 → the portal TTFT/TPOT stats fully explain the score; our score model is calibrated.
 - **Where the points are (after 013)**: s_ttft ≈ 0.73 (TTFT 66ms), s_tpot ≈ 0.44 (TPOT ~4ms). **TPOT is the big remaining hole**: 4→2ms ⇒ +17 points (~75 total); 4→1.5ms ⇒ +22 (~81). TTFT 66→40ms ⇒ only +6. Priority: speculative decoding (ngram/suffix), full CUDA graphs, async scheduling — then TTFT trimming.
 - Quota note: 011 burned on 16/07; 012+013 on 17/07 morning → 3 submissions left for 17/07.
+- **Pod battery R0–R7 (17/07, 4090 + MiG sim, v0.25.1)** — full numbers in `tools/battery_r2_20260717.md`: R0 (=013 flags) fresh **70.27** / shared **81.01**; ngram spec **loses big** (TPOT 2.47→3.43ms, worse than bf16 — do not ship); suffix spec **FAILS on the stock image** (needs `pip install arctic-inference`, portal would fail identically — custom-image-only lever); full-cudagraph (R3) and async-scheduling (R4) neutral on the 4090 but they target per-step host overhead, which the slice has ~2ms/step of → shipped as submit_014; chunk4096 slightly negative; bf16 −12 fresh. **Key calibration: portal 013 ttft p50 66ms ≈ fresh-local 61ms (NOT shared-local 20ms) → real prompts have no turn-to-turn byte-stable prefix; TTFT is at its practical floor; all remaining upside is TPOT** (portal 4ms vs local 2.47ms ⇒ slice decode ~1.6× slower + ~2ms/step overhead). APC verified working for LFM2.5 hybrid (shared t0=60ms → t2..5=18ms, hit rate 69.8%).
 
-### Round-2 next candidates (pod-verify first, then submit)
+### Round-2 next candidates
 
-- `--speculative-config` ngram / suffix (no draft weights needed; external downloads are banned so a draft model would have to be baked into a custom image — avoid unless ngram/suffix underdeliver).
-- `--compilation-config '{"cudagraph_mode":"FULL_AND_PIECEWISE"}'` — at batch 1–6 with a 1.2B model, per-step host overhead is likely a large TPOT fraction.
-- `--async-scheduling` (v0.24+).
-- Chunked-prefill size sweep (default 2048 vs 4096: low concurrency changes the round-1 calculus, but round 1 proved 16384 is toxic under load).
+- **submit_014 (drafted)**: 013 + `--async-scheduling` + `--compilation-config={"cudagraph_mode":"FULL_AND_PIECEWISE"}` — local-neutral, slice-plausible TPOT win, worst case ≈ 013.
+- Suffix decoding via custom image (crane append `arctic-inference==0.1.1` wheels onto v0.25.1 — same round-1 crane workflow); draft-model spec decode would need weights baked in. Only pursue if 014 underdelivers and TPOT stays ≥4ms.
 - BF16 twin of the best config — tie-break criterion #1 is accuracy drop.
 - **Final-5 selection (end of round)**: must self-run GPQA (lm_eval gpqa_diamond) on a pod for every candidate config since the portal no longer reports accuracy_drop; pick best-ERS configs whose measured Δ ≤ 0.10, and include one BF16 config as tie-break insurance.
 
-Open questions: does APC hit on the real prompts (public trace hides them — compare shared vs fresh replay ERS against the portal number); are bodies still `temperature=0` (assumed); is a newer vLLM image formally fine as "vLLM" (58.68 graded OK ⇒ de-facto yes, watch the forum).
+Open questions: are bodies still `temperature=0` (assumed); is a newer vLLM image formally fine as "vLLM" (58.68 graded OK ⇒ de-facto yes, watch the forum).
 
 ### Pod experiment protocol (round 2)
 

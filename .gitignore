@@ -22,3 +22,4 @@ scratch/
 /context_support
 *.png
 experiment_log.txt
+.env
