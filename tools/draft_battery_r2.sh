@@ -36,11 +36,17 @@ CFG[D2]="--speculative-config {\"model\":\"/workspace/draft350\",\"num_speculati
 CFG[D3]="--speculative-config {\"model\":\"/workspace/draft230\",\"num_speculative_tokens\":2,\"quantization\":\"fp8\"}"
 CFG[D4]="--speculative-config {\"model\":\"/workspace/draft230\",\"num_speculative_tokens\":5,\"quantization\":\"fp8\"}"
 CFG[D5]="--speculative-config {\"model\":\"/workspace/draft350\",\"num_speculative_tokens\":2,\"quantization\":\"fp8\"}"
-# D1/D2 die at startup on v0.25.1: "hf_overrides must be a dict for get_quant_config"
-# when the draft has its own quantization. Fix: pass an explicit empty --hf-overrides {}.
+# DEAD ENDS on v0.25.1 (kept for the record): D1/D2/D6/D8 — draft quantization hits
+# "hf_overrides must be a dict" (internal wrap, CLI {} doesn't help); D7 — hybrid drafts
+# rejected ("All drafting layers should belong to the same kv cache group") ⇒ no
+# LFM2-family draft is possible. Remaining tracks: suffix (D9), heterogeneous-vocab
+# dense draft via TLI (D10, SmolLM2-135M; requires hf download to /workspace/draft_smol).
+# D9 requires: pip install arctic-inference==0.1.1
 CFG[D6]="--hf-overrides {} --speculative-config {\"model\":\"/workspace/draft230\",\"num_speculative_tokens\":3,\"quantization\":\"fp8\"}"
 CFG[D7]="--speculative-config {\"model\":\"/workspace/draft230\",\"num_speculative_tokens\":3}"
 CFG[D8]="--hf-overrides {} --speculative-config {\"model\":\"/workspace/draft350\",\"num_speculative_tokens\":3,\"quantization\":\"fp8\"}"
+CFG[D9]="--speculative-config {\"method\":\"suffix\"}"
+CFG[D10]="--speculative-config {\"model\":\"/workspace/draft_smol\",\"num_speculative_tokens\":3,\"use_heterogeneous_vocab\":true}"
 ORDER=${ONLY:-"D0 D1 D2"}
 
 wait_health() {
