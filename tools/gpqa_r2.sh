@@ -88,7 +88,7 @@ for id in $ORDER; do
     continue
   fi
   lm_eval --model local-completions \
-    --model_args "model=LFM2.5-1.2B-Instruct,base_url=${URL}/v1/completions,num_concurrent=8,max_retries=3,tokenized_requests=False" \
+    --model_args "model=LFM2.5-1.2B-Instruct,base_url=${URL}/v1/completions,tokenizer=${MODEL},num_concurrent=8,max_retries=3,tokenized_requests=False" \
     --tasks "$TASKS" \
     --output_path "$OUT/${id}" 2>&1 | tee "$OUT/${id}_eval.log" | tail -12
   stop_server
