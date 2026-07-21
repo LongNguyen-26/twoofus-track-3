@@ -36,6 +36,11 @@ CFG[D2]="--speculative-config {\"model\":\"/workspace/draft350\",\"num_speculati
 CFG[D3]="--speculative-config {\"model\":\"/workspace/draft230\",\"num_speculative_tokens\":2,\"quantization\":\"fp8\"}"
 CFG[D4]="--speculative-config {\"model\":\"/workspace/draft230\",\"num_speculative_tokens\":5,\"quantization\":\"fp8\"}"
 CFG[D5]="--speculative-config {\"model\":\"/workspace/draft350\",\"num_speculative_tokens\":2,\"quantization\":\"fp8\"}"
+# D1/D2 die at startup on v0.25.1: "hf_overrides must be a dict for get_quant_config"
+# when the draft has its own quantization. Fix: pass an explicit empty --hf-overrides {}.
+CFG[D6]="--hf-overrides {} --speculative-config {\"model\":\"/workspace/draft230\",\"num_speculative_tokens\":3,\"quantization\":\"fp8\"}"
+CFG[D7]="--speculative-config {\"model\":\"/workspace/draft230\",\"num_speculative_tokens\":3}"
+CFG[D8]="--hf-overrides {} --speculative-config {\"model\":\"/workspace/draft350\",\"num_speculative_tokens\":3,\"quantization\":\"fp8\"}"
 ORDER=${ONLY:-"D0 D1 D2"}
 
 wait_health() {
