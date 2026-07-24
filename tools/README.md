@@ -8,12 +8,15 @@ Run commands from the repository root unless a script says otherwise.
 - `runpod/`: RunPod setup, battery, and image-packaging scripts.
 - `docs/`: experiment reports and operational runbooks.
 
-Current round-2 suffix workflow:
+Current round-2 candidate workflow:
 
 ```bash
-bash tools/runpod/pod_install_suffix.sh
-bash tools/runpod/suffix_battery_r2.sh
+bash tools/runpod/pod_install_bitsandbytes.sh
+bash tools/runpod/w4_battery_r2.sh
 ```
 
-See `tools/docs/SUFFIX_RUNPOD.md` for deployment, image publication, and
-portal-compose instructions.
+See `tools/docs/W4_RUNPOD.md` for the bracket, candidate gates, and follow-up
+GPQA command.
+
+Suffix decoding is archived after failing correctness and latency gates. See
+`tools/docs/SUFFIX_FINDINGS_20260724.md`; do not publish the suffix image.

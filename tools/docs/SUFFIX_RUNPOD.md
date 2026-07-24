@@ -1,5 +1,11 @@
 # Suffix decoding: RunPod test and image workflow
 
+> **Archived / rejected on 24/07/2026.** S4 and S8 both failed exact greedy
+> equivalence (0/6), worsened needle retrieval, slowed TPOT by 21–22%, and
+> lost about 4.7 ERS points against a stable FP8 bracket. Do not run S16,
+> publish the image, or submit this configuration. See
+> `tools/docs/SUFFIX_FINDINGS_20260724.md`.
+
 This workflow tests suffix decoding first in a disposable container, then
 publishes the exact tested extension as one layer on
 `vllm/vllm-openai:v0.25.1`. No Docker daemon is required.
@@ -92,7 +98,7 @@ Candidate gate:
   portal-calibrated regime
 - D0A and D0B reveal how much host drift occurred during the battery
 
-## 4. Publish the custom image
+## 4. Historical image-publication procedure — do not execute
 
 Create a public Docker Hub repository, then authenticate with an access token:
 
@@ -120,7 +126,7 @@ docker build \
 docker push DOCKERHUB_USER/lfm25-suffix:v1
 ```
 
-## 5. Validate the published image
+## 5. Historical published-image validation — do not execute
 
 Deploy a new pod using `DOCKERHUB_USER/lfm25-suffix:v1` with the same
 keepalive command, clone/pull the repository, download or reuse the model, and
@@ -135,7 +141,7 @@ ONLY="D0A S8" MODES="fresh" \
 Replace `S8` with the winning limit. This catches a missing layer or incorrect
 public image before using a portal quota.
 
-## 6. Prepare the portal compose
+## 6. Historical portal compose — do not execute
 
 Copy `docker/lfm25-suffix/docker-compose.example.yml` into the next submission
 directory. Replace:

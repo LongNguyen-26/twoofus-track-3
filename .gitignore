@@ -17,6 +17,7 @@ models/
 # Local scratch
 scratch/
 *.log
+/results_*/
 
 /requirements
 /context_support

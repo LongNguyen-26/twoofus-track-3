@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # GPQA-diamond Δ measurement for the final-5 audit (round 2).
 # The portal no longer reports accuracy_drop; BTC runs GPQA full post-online on
-# each team's <=5 picked submissions. We measure Δ(bf16 vs fp8) ourselves.
+# each team's <=5 picked submissions. We measure Δ against BF16 ourselves.
 # Absolute accuracy need not match BTC's harness — Δ between configs on the
 # same method is the signal (free band: Δ <= 0.10).
 #
@@ -11,6 +11,7 @@
 #
 # Usage: bash tools/evaluation/gpqa_r2.sh
 #        ONLY=G0 TASKS=gpqa_diamond_cot_zeroshot bash tools/evaluation/gpqa_r2.sh
+#        ONLY="G1 G2" bash tools/evaluation/gpqa_r2.sh  # BF16 vs BNB4
 set -uo pipefail
 unset VLLM_API_KEY
 HF_TOKEN=$(cat /workspace/.hf_token)
@@ -47,6 +48,7 @@ BASE_FLAGS=(
 declare -A CFG
 CFG[G0]="--quantization=fp8"   # = submit_013/020 config
 CFG[G1]=""                     # = submit_018 bf16 twin
+CFG[G2]="--quantization=bitsandbytes --load-format=bitsandbytes"
 ORDER=${ONLY:-"G0 G1"}
 
 wait_health() {

@@ -37,9 +37,16 @@ fi
 # A system-site-packages venv sees the image's matching torch build, while
 # build-only pins such as protobuf and nanobind remain isolated from vLLM.
 python3 -m venv --clear --system-site-packages "$BUILD_VENV"
+# pip-installed build executables (notably cmake) must also be visible to the
+# setuptools build_ext subprocess. Invoking pip through the venv's Python does
+# not prepend this directory to PATH by itself.
+export PATH="$BUILD_VENV/bin:$PATH"
 "$BUILD_VENV/bin/python" -m pip install --no-cache-dir --upgrade \
-  pip setuptools wheel ninja cmake nanobind==2.9.2 \
-  protobuf==5.29.5 grpcio-tools
+  pip 'setuptools>=77,<81' wheel ninja cmake nanobind==2.9.2 \
+  protobuf==5.29.5 grpcio-tools==1.71.2
+hash -r
+command -v cmake
+cmake --version
 
 "$BUILD_VENV/bin/python" -c \
   "import torch; print('building against torch', torch.__version__)"
