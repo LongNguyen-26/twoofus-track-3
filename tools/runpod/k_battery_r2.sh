@@ -75,11 +75,11 @@ for id in $ORDER; do
   nvidia-smi --query-gpu=memory.used --format=csv,noheader | head -1
   for mode in $MODES; do
     echo "--- replay mode=$mode ---"
-    python3 tools/replay_r2.py --url "$URL" --mode "$mode" --tokenizer "$MODEL" \
+    python3 tools/replay/replay_r2.py --url "$URL" --mode "$mode" --tokenizer "$MODEL" \
       | tee "$OUT/${id}_${mode}.log"
   done
   echo "--- needle test ($id) ---"
-  python3 tools/needle_test.py "$URL" | tee "$OUT/${id}_needle.log"
+  python3 tools/evaluation/needle_test.py "$URL" | tee "$OUT/${id}_needle.log"
   stop_server
 done
 

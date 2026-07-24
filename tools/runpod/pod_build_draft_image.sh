@@ -6,7 +6,8 @@
 #
 # Usage (inside the pod, AFTER the D-series test picks a winner):
 #   1) crane auth login index.docker.io -u <dockerhub-user>   # paste an access token, NOT your password
-#   2) DRAFT_DIR=/workspace/draft230 TAG=<dockerhub-user>/lfm25-draft:v1 bash tools/pod_build_draft_image.sh
+#   2) DRAFT_DIR=/workspace/draft230 TAG=<dockerhub-user>/lfm25-draft:v1 \
+#        bash tools/runpod/pod_build_draft_image.sh
 #
 # The compose then uses:  image: <TAG>
 #   --speculative-config={"model":"/draft-model","num_speculative_tokens":N,"quantization":"fp8"}

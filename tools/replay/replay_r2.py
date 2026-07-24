@@ -10,17 +10,21 @@ Prompts are seeded per (mode, conv_id, turn_idx): identical across server
 configs, so config A vs B comparisons are apples-to-apples.
 
 Timing is closed-loop like BTC: conversation turn 0 fires at timestamp_ms;
-turn k+1 fires think_ms after turn k's response completes. Warmup rows
-(in_warmup=true) are sent but excluded from ERS.
+turn k+1 fires think_ms after turn k's response completes. The current BTC
+harness (confirmed 22/07/2026) scores ALL 420 rows. The 90 rows whose stale
+public-trace metadata says in_warmup=true are therefore included in ERS.
+
+For historical comparison with the pre-18/07 harness only, pass
+--legacy-exclude-marked-warmup to reproduce the old 330-request policy.
 
 Run INSIDE the GPU pod (localhost). Requires: pip install aiohttp
 (transformers + the model tokenizer are used if available, else a chars/3
 heuristic sizes the prompts).
 
 Usage:
-  python replay_r2.py --url http://localhost:8001 --mode shared
-  python replay_r2.py --url http://localhost:8001 --mode fresh
-  python replay_r2.py --url http://localhost:8001 --mode shared --limit-convs 5   # smoke
+  python tools/replay/replay_r2.py --url http://localhost:8001 --mode shared
+  python tools/replay/replay_r2.py --url http://localhost:8001 --mode fresh
+  python tools/replay/replay_r2.py --url http://localhost:8001 --mode shared --limit-convs 5
 """
 import argparse
 import asyncio
@@ -32,7 +36,13 @@ import time
 
 import aiohttp
 
-TRACE = os.path.join(os.path.dirname(__file__), "..", "input_part2", "trace_grading_public.jsonl")
+TRACE = os.path.join(
+    os.path.dirname(__file__),
+    "..",
+    "..",
+    "input_part2",
+    "trace_grading_public.jsonl",
+)
 
 # Round-2 scoring constants
 F_TTFT, C_TTFT = 10.0, 400.0   # ms
@@ -201,9 +211,14 @@ def pct(vals, q):
     return vals[min(len(vals) - 1, int(q * len(vals)))]
 
 
-def summarize(rows, results, label):
-    scored = [r for r in rows if not r["in_warmup"]]
-    warm = [r for r in rows if r["in_warmup"]]
+def summarize(rows, results, label, legacy_exclude_marked_warmup=False):
+    marked_warmup = [r for r in rows if r["in_warmup"]]
+    if legacy_exclude_marked_warmup:
+        scored = [r for r in rows if not r["in_warmup"]]
+        score_policy = "LEGACY 330 SCORED"
+    else:
+        scored = rows
+        score_policy = "ALL REQUESTS SCORED"
 
     def stats(part, name):
         rs = [results[(r["conv_id"], r["turn_idx"])] for r in part]
@@ -219,8 +234,8 @@ def summarize(rows, results, label):
             print(f"  tpot_ms: p50={pct(p,0.5):.2f} p95={pct(p,0.95):.2f} mean={statistics.mean(p):.2f}")
         return ers
 
-    ers = stats(scored, "SCORED")
-    # per-turn TTFT on scored: turn0 = cold conv start; turns 1-5 show APC effect
+    ers = stats(scored, score_policy)
+    # Per-turn TTFT: turn0 = cold conv start; turns 1-5 show APC effect.
     print("  scored TTFT p50 by turn_idx:", end=" ")
     for t in sorted(set(r["turn_idx"] for r in scored)):
         vals = [results[(r["conv_id"], r["turn_idx"])].get("ttft_ms")
@@ -228,8 +243,13 @@ def summarize(rows, results, label):
         vals = [v for v in vals if v is not None]
         print(f"t{t}={pct(vals,0.5):.0f}" if vals else f"t{t}=err", end=" ")
     print()
-    if warm:
-        stats(warm, "warmup (not scored)")
+    if marked_warmup:
+        marker_note = (
+            "stale in_warmup marker (EXCLUDED by legacy policy)"
+            if legacy_exclude_marked_warmup
+            else "stale in_warmup marker (INCLUDED above)"
+        )
+        stats(marked_warmup, marker_note)
     return ers
 
 
@@ -246,6 +266,14 @@ async def main():
     ap.add_argument("--limit-convs", type=int, default=None)
     ap.add_argument("--no-ignore-eos", action="store_true",
                     help="let the model stop early (BTC-like); default forces 200 tokens")
+    ap.add_argument(
+        "--legacy-exclude-marked-warmup",
+        action="store_true",
+        help=(
+            "historical pre-18/07 comparison only: exclude rows whose stale "
+            "trace metadata says in_warmup=true (330 scored instead of 420)"
+        ),
+    )
     args = ap.parse_args()
 
     rows = [json.loads(l) for l in open(args.trace, encoding="utf-8")]
@@ -253,7 +281,15 @@ async def main():
         keep = sorted(set(r["conv_id"] for r in rows))[: args.limit_convs]
         rows = [r for r in rows if r["conv_id"] in keep]
 
-    print(f"[replay] {len(rows)} requests, mode={args.mode}, scale={args.time_scale}")
+    score_policy = (
+        "legacy: exclude in_warmup marker"
+        if args.legacy_exclude_marked_warmup
+        else "current BTC: all requests scored"
+    )
+    print(
+        f"[replay] {len(rows)} requests, mode={args.mode}, "
+        f"scale={args.time_scale}, score_policy={score_policy}"
+    )
     prompts = build_prompts(rows, args.mode, args.tokenizer or None)
 
     convs = {}
@@ -270,7 +306,12 @@ async def main():
             for cr in convs.values()
         ))
     print(f"[replay] wall time {time.perf_counter()-t0:.0f}s")
-    summarize(rows, results, f"mode={args.mode}")
+    summarize(
+        rows,
+        results,
+        f"mode={args.mode}",
+        legacy_exclude_marked_warmup=args.legacy_exclude_marked_warmup,
+    )
 
 
 if __name__ == "__main__":

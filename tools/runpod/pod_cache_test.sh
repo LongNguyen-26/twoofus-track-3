@@ -5,8 +5,8 @@
 # reproduces the final image's behavior exactly.
 #
 # Usage (pod Web Terminal, from the repo root, keepalive on 8000 already up):
-#   cd /workspace/repo && git pull && bash tools/pod_cache_test.sh
-#   QUANT=0 bash tools/pod_cache_test.sh   # if fp8 startup fails on this GPU
+#   cd /workspace/repo && git pull && bash tools/runpod/pod_cache_test.sh
+#   QUANT=0 bash tools/runpod/pod_cache_test.sh
 #
 # Success criteria (printed as VERDICT lines at the end):
 #   1) byte-identity: the 2nd identical curl returns byte-identical JSON
@@ -125,10 +125,10 @@ fi
 
   # ---- 4. probe + full 2-pass replay (client runs unpatched) ----------------
   echo "=== PROBE (cold vs warm; warm should be ~ms now, was ~44ms APC-only) ==="
-  VLLM_EXACT_CACHE=0 python3 tools/replay_trace.py --url "$URL" --probe 0
+  VLLM_EXACT_CACHE=0 python3 tools/replay/replay_trace.py --url "$URL" --probe 0
   echo ""
   echo "=== FULL 2-PASS REPLAY (pass 2 should be ERS >= 0.98) ==="
-  VLLM_EXACT_CACHE=0 python3 tools/replay_trace.py --url "$URL" --passes 2
+  VLLM_EXACT_CACHE=0 python3 tools/replay/replay_trace.py --url "$URL" --passes 2
   echo ""
   echo "=== cache counters from server log ==="
   echo "STOREs: $(grep -c 'exact-cache] STORE' "${OUT}/server_cache.log")"

@@ -5,13 +5,13 @@ Requires: pip install aiohttp
 
 Usage:
   # Key experiment: does the prefix cache give a warm hit? (cold vs warm TTFT)
-  python replay_trace.py --url http://localhost:8000 --probe 0
+  python tools/replay/replay_trace.py --url http://localhost:8000 --probe 0
 
   # Full run like BTC: pass 1 = primer (unscored), pass 2 = scored, waves every 5s
-  python replay_trace.py --url http://localhost:8000 --passes 2
+  python tools/replay/replay_trace.py --url http://localhost:8000 --passes 2
 
   # Quick smoke: first N requests only, no wave timing
-  python replay_trace.py --url http://localhost:8000 --limit 5 --no-timing
+  python tools/replay/replay_trace.py --url http://localhost:8000 --limit 5 --no-timing
 """
 import argparse
 import asyncio
@@ -21,7 +21,9 @@ import time
 
 import aiohttp
 
-TRACE = os.path.join(os.path.dirname(__file__), "..", "input", "trace-round1.jsonl")
+TRACE = os.path.join(
+    os.path.dirname(__file__), "..", "..", "input", "trace-round1.jsonl"
+)
 
 # BTC scoring constants
 F_TTFT, C_TTFT = 100.0, 1500.0   # ms

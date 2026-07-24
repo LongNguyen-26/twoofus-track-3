@@ -18,7 +18,7 @@
 #   export HF_HUB_ENABLE_HF_TRANSFER=1
 #   huggingface-cli download LiquidAI/LFM2.5-1.2B-Instruct --local-dir /workspace/model
 #
-# Then:  bash tools/pod_battery_r2.sh
+# Then:  bash tools/runpod/pod_battery_r2.sh
 # Env knobs:
 #   MODES="shared fresh"   replay prompt regimes per config (default both)
 #   ONLY="R1 R3"           run just these config IDs
@@ -112,7 +112,7 @@ for id in $ORDER; do
   nvidia-smi --query-gpu=memory.used --format=csv,noheader | head -1
   for mode in $MODES; do
     echo "--- replay mode=$mode ---"
-    python3 tools/replay_r2.py --url "$URL" --mode "$mode" --tokenizer "$MODEL" \
+    python3 tools/replay/replay_r2.py --url "$URL" --mode "$mode" --tokenizer "$MODEL" \
       | tee "$OUT/${id}_${mode}.log"
   done
   stop_server

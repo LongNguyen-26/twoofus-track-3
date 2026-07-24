@@ -1,7 +1,8 @@
 """Tokenize the trace with the real Qwen3.5-2B tokenizer and print workload facts.
 
 Needs: pip install transformers huggingface_hub  (downloads ~15MB of tokenizer files,
-never the weights). Run from the repo root:  python tools/analyze_trace.py
+never the weights). Run from the repo root:
+python tools/analysis/analyze_trace.py
 """
 import json
 import os
@@ -10,7 +11,9 @@ from huggingface_hub import hf_hub_download
 from transformers import AutoTokenizer
 
 REPO = "Qwen/Qwen3.5-2B"
-TRACE = os.path.join(os.path.dirname(__file__), "..", "input", "trace-round1.jsonl")
+TRACE = os.path.join(
+    os.path.dirname(__file__), "..", "..", "input", "trace-round1.jsonl"
+)
 
 tok = AutoTokenizer.from_pretrained(os.path.dirname(hf_hub_download(REPO, "tokenizer.json")))
 chat_template = open(hf_hub_download(REPO, "chat_template.jinja"), encoding="utf-8").read()

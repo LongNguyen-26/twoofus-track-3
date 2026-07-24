@@ -1,21 +1,35 @@
 # Analyze the round-2 public trace (arrival + token counts only; prompts withheld by BTC).
-# Usage: python tools\analyze_trace_r2.py
+# Usage: python tools/analysis/analyze_trace_r2.py
 import json
 import statistics
 from collections import defaultdict
 from pathlib import Path
 
-TRACE = Path(__file__).resolve().parent.parent / "input_part2" / "trace_grading_public.jsonl"
+TRACE = (
+    Path(__file__).resolve().parents[2]
+    / "input_part2"
+    / "trace_grading_public.jsonl"
+)
 
 rows = [json.loads(l) for l in TRACE.read_text().splitlines() if l.strip()]
 print(f"total rows: {len(rows)}")
 
-warm = [r for r in rows if r["in_warmup"]]
-scored = [r for r in rows if not r["in_warmup"]]
-print(f"warmup rows: {len(warm)}  (convs: {sorted(set(r['conv_id'] for r in warm))})")
-print(f"scored rows: {len(scored)}  (convs: {len(set(r['conv_id'] for r in scored))})")
+marked_warm = [r for r in rows if r["in_warmup"]]
+marked_regular = [r for r in rows if not r["in_warmup"]]
+print(
+    f"stale in_warmup marker: {len(marked_warm)} rows "
+    f"(convs: {sorted(set(r['conv_id'] for r in marked_warm))})"
+)
+print(
+    f"rows without marker: {len(marked_regular)} "
+    f"(convs: {len(set(r['conv_id'] for r in marked_regular))})"
+)
+print(f"CURRENT BTC scored rows: {len(rows)} (all requests; no warm-up)")
 
-for name, part in (("warmup", warm), ("scored", scored)):
+for name, part in (
+    ("stale in_warmup marker", marked_warm),
+    ("rows without marker", marked_regular),
+):
     convs = defaultdict(list)
     for r in part:
         convs[r["conv_id"]].append(r)
@@ -43,9 +57,9 @@ for name, part in (("warmup", warm), ("scored", scored)):
     print(f"  think_ms: values={sorted(set(tm))}")
 
 # Does input grow with turn index (prefix accumulation) or stay flat?
-print("\nin_tokens_est by turn_idx (scored):")
+print("\nin_tokens_est by turn_idx (all 420 currently scored rows):")
 byturn = defaultdict(list)
-for r in scored:
+for r in rows:
     byturn[r["turn_idx"]].append(r["in_tokens_est"])
 for t in sorted(byturn):
     v = byturn[t]
@@ -78,12 +92,15 @@ def sim_concurrency(part, service_ms):
     dur = events[-1][0] - events[0][0]
     return peak, area / dur if dur else 0.0, dur / 1000.0
 
-print("\nconcurrency sim on SCORED part (service time -> peak / avg in-flight / makespan s):")
+print("\nconcurrency sim on CURRENT ALL-420 workload:")
 for s in (500, 1000, 2000, 3000, 5000):
-    peak, avg, dur = sim_concurrency(scored, s)
+    peak, avg, dur = sim_concurrency(rows, s)
     print(f"  service {s:>4}ms: peak={peak:>3} avg={avg:5.1f} makespan={dur:7.1f}s")
 
 # Same but everything (warmup runs first? check overlap of arrival windows)
-wa = [r["timestamp_ms"] for r in warm if r["turn_idx"] == 0]
-sa = [r["timestamp_ms"] for r in scored if r["turn_idx"] == 0]
-print(f"\nwarmup arrival window: {min(wa)}..{max(wa)} ms; scored arrival window: {min(sa)}..{max(sa)} ms")
+wa = [r["timestamp_ms"] for r in marked_warm if r["turn_idx"] == 0]
+sa = [r["timestamp_ms"] for r in marked_regular if r["turn_idx"] == 0]
+print(
+    f"\nstale-marker arrival window: {min(wa)}..{max(wa)} ms; "
+    f"remaining arrival window: {min(sa)}..{max(sa)} ms"
+)

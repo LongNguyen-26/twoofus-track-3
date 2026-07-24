@@ -1,6 +1,8 @@
-"""Needle-in-haystack long-context integrity check (~28k tokens), modeled on the
-BTC harness probe that killed submit_015. Run against a live server: RETRIEVAL
-must be ~5/5; 0/5 = the config corrupts long context -> NEVER submit it."""
+"""Needle-in-haystack long-context integrity check (~28k tokens).
+
+Run from the repo root with:
+python tools/evaluation/needle_test.py http://localhost:8001
+"""
 import json
 import random
 import sys

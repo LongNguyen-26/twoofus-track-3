@@ -26,7 +26,7 @@
 #   export HF_HUB_ENABLE_HF_TRANSFER=1
 #   huggingface-cli download Qwen/Qwen3.5-2B --local-dir /workspace/model
 #
-# Then from the repo root:  bash tools/pod_overnight.sh
+# Then from the repo root:  bash tools/runpod/pod_overnight.sh
 #
 # NOTE: this covers all configs that share ONE image (v0.22.1). To test
 # v0.24.0, redeploy the pod with image vllm/vllm-openai:v0.24.0 and rerun.
@@ -160,10 +160,10 @@ run_cfg() {
   {
     nvidia-smi --query-gpu=memory.used,memory.total --format=csv,noheader
     echo "=== PROBE (cold vs warm TTFT on request 0) ==="
-    python3 tools/replay_trace.py --url "$URL" --probe 0
+    python3 tools/replay/replay_trace.py --url "$URL" --probe 0
     echo ""
     echo "=== FULL 2-PASS REPLAY (primer + scored, wave-timed) ==="
-    python3 tools/replay_trace.py --url "$URL" --passes 2
+    python3 tools/replay/replay_trace.py --url "$URL" --passes 2
     echo ""
     echo "=== prefix-cache stats from server log ==="
     grep -i "hit rate\|prefix" "${OUT}/server_${name}.log" | tail -5

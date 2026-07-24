@@ -9,8 +9,8 @@
 # chat or git; the HF account must have accepted the Idavidrein/gpqa gate):
 #   printf '%s' 'hf_YOURTOKEN' > /workspace/.hf_token && chmod 600 /workspace/.hf_token
 #
-# Usage: bash tools/gpqa_r2.sh                    # G0 (fp8) + G1 (bf16), zeroshot MCQ
-#        ONLY=G0 TASKS=gpqa_diamond_cot_zeroshot bash tools/gpqa_r2.sh
+# Usage: bash tools/evaluation/gpqa_r2.sh
+#        ONLY=G0 TASKS=gpqa_diamond_cot_zeroshot bash tools/evaluation/gpqa_r2.sh
 set -uo pipefail
 unset VLLM_API_KEY
 HF_TOKEN=$(cat /workspace/.hf_token)
