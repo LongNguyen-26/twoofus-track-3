@@ -172,6 +172,25 @@ Even a magic 10ms TTFT scores only **70.9** at today's 4.07ms TPOT — so TTFT t
 `replay_r2.py` uses **synthetic random-token prompts**, so input-copying speculative methods (ngram, prompt-lookup, suffix) have ≈0 acceptance *by construction*. The R1 "ngram CPU loses badly" result is therefore uninformative about the real trace, which is multi-turn QA over ~4k tokens of context — a workload where prompt lookup often wins. Build a realistic document-QA corpus before ruling that family out. (The suffix rejection stands on its own: 0/6 greedy equivalence and corrupted output are prompt-independent.)
 
 - **vLLM versions (checked 25/07)**: **v0.25.1 (14/07) is still the newest tagged release**; v0.25.0 11/07, v0.24.0 29/06, v0.23.0 15/06. Newer code is only reachable via pinned nightly images, e.g. `vllm/vllm-openai:nightly-dd72658e7db0c6a674f473f6f9f0f5c2ebe7e523` (24/07). Version bumps were historically the single biggest win (013: +4.57, all TTFT), so a nightly A/B is cheap and high-value — probe the source first with `tools/runpod/nightly_source_probe.sh`.
+### 25/07 afternoon: the nightly image is the first real TPOT win of the round
+
+Paired submission, same hour, both `total_count 420` / `failed_count 5` / `tbt_median 4`:
+
+| | submitted | ERS | TTFT p50/p95 | **implied TPOT** |
+|---|---|---|---|---|
+| **submit_029** — 020's flags on `nightly-0ba2aa35a81dcc3246b26291368b53fa2389c7d7` | 14:44 | **61.83** | 54 / 73 | **3.87ms** |
+| **submit_030** — byte-identical 020 control | 15:31 | 60.51 | 51 / 67 | **4.14ms** |
+
+The nightly trades a little TTFT (54 vs 51) for **−0.27ms TPOT (−6.5%)**, net **+1.32 points**. Every other lever in this round moved TTFT only; this is the first that touches decode. Across its four measurements config 020 gives TPOT 4.07 / 4.01 / 4.28 / 4.14 (mean 4.13, sd 0.11), so the nightly's 3.87 sits below all of them, about 2.4σ under the mean — suggestive from one sample, worth replicating.
+
+**Harness/host drift confirmed independently**: today's 020 control shows TTFT 51ms where 18/07 showed 42ms, with identical config and flags. If the nightly's TPOT edge holds on a 42ms-TTFT day it scores ≈**64.6**, above the standing best of 63.08.
+
+**"Older versions are more stable" — resolved, and it cuts both ways.** The instability is real but confined to *new features*: `ngram_gpu` and CPU `ngram` both corrupt output on v0.25.1 and hybrid spec decode is broken. The *baseline serving path* runs the other way, for a concrete reason: LFM2.5 is a young hybrid ShortConv architecture and vLLM's hybrid support has been improving release over release — prefix caching for hybrid models only landed in v0.25.0, and APC is load-bearing (disabling it cost 15.8 points). Older versions support this architecture **worse**, not more safely. Measured chain: v0.22.1 fp8 54.11 → v0.25.1 fp8 58.68 → nightly beats v0.25.1 by 1.32 on a same-hour control. v0.24.0 is still worth one slot to close the gap honestly, but the prior is now poor.
+
+**`tokens_per_sec` is confirmed useless**: the identical 020 config produced 0.0413 (03:13) and 0.0595 (15:31) on the same day. Ignore it until BTC defines it.
+
+**Tag-persistence risk for any nightly finalist**: Docker Hub currently retains commit-pinned nightlies for about 9 days (17–25/07). If a final-5 pick references a tag that gets pruned before hậu kiểm, the submission becomes unservable. Mirror it to the team registry before locking the final-5 — `crane copy vllm/vllm-openai:nightly-<sha> nguyenlong26/lfm25-vllm:<sha>` — which stays legal under BTC's 22/07 permission for custom images built from any vLLM image, and is byte-identical so it adds no audit surface.
+
 ### Lever space after the 25/07 H100 session — everything is closed
 
 | family | status |
@@ -191,7 +210,7 @@ Even a magic 10ms TTFT scores only **70.9** at today's 4.07ms TPOT — so TTFT t
 
 **Version coverage is a real gap.** Only v0.22.1 and v0.25.1 have ever been submitted. **v0.23.0 and v0.24.0 have never been tested**, and the single controlled comparison we own (012 fp8 54.11 vs 013 fp8 58.68, same morning, same harness) shows only that v0.22.1 is worse — it does not establish that newest is best. The v0.22.1→v0.25.1 gain was entirely TTFT (85→66ms p50) and is plausibly the v0.25.0 hybrid-APC work, which v0.23/v0.24 predate, so the prior for an older version winning is low but untested. Nightly builds newer than v0.25.1 also exist, pinned by commit (`nightly-0ba2aa35a81dcc3246b26291368b53fa2389c7d7` = the tree source-probed on 25/07).
 
-- **Plan for the remaining slots (25–30/07)**. All local questions are closed, so every slot now buys portal information rather than local confidence. ① **25/07, last 2 slots — version A/B with a same-hour control**: submit_029 = 020's flags on `nightly-0ba2aa35…`, then submit_030 = byte-identical 020 immediately after. Version bumps are the only lever that ever produced a large win, and pairing with a control is the only way to read a result now that the harness may have changed under us. ② **26/07 — close the version gap**: v0.24.0 and v0.23.0 with 020's flags, again interleaved with a 020 control. Low prior, zero cost beyond slots, and it is the last untested dimension. ③ Read `config_hash` off every result page from now on and record it; it is the only signal that distinguishes drift from noise. ④ Ask BTC about median-vs-maximum scoring, the `tokens_per_sec` definition, and the long-context probe threshold. ⑤ Lock a final-5 of clean stock-vLLM configs (020, 024, plus 018 as bf16 insurance). Do not revisit any row in the closed-lever table above.
+- **Plan for the remaining slots (26–30/07)**. All local questions are closed, so every slot buys portal information. The version axis is the only live one and it just paid, so exploit it with bracketed controls rather than single shots. **26/07, 5 slots in this order**: ① 020 control (morning anchor) → ② newest available nightly → ③ v0.24.0 with 020's flags (closes the version gap and tests the older-is-stabler hypothesis directly) → ④ nightly `0ba2aa3` again (replicates today's +1.32) → ⑤ 020 control (afternoon anchor). Two controls bracketing three treatments is what makes any of it readable given ±1–2 point drift. Then: ⑥ record `config_hash` from every result page — it is the only signal separating drift from noise; ⑦ mirror any nightly finalist with `crane copy` before locking the final-5; ⑧ ask BTC about median-vs-maximum scoring, the `tokens_per_sec` definition, and the long-context probe threshold. Do not revisit any row in the closed-lever table below.
 
 Open question: are bodies still `temperature=0` (assumed). Custom images built from any vLLM image and packaged **draft** weights are formally allowed (22/07); offline/pre-quantized **target** weights are formally forbidden (25/07).
 
