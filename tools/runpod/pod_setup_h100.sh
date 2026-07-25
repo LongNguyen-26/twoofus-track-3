@@ -18,12 +18,20 @@ echo "==== 2. model ===="
 # HF_HUB_DISABLE_XET=1 is mandatory: on a network volume the xet path deadlocks
 # on .lock files and hangs in "Reconstructing". Killed downloads leave stale
 # locks -- recover with: pkill -9 -f "hf download" && rm -rf /workspace/model
+# `huggingface-cli` was removed in the 2026 hub releases and now exits with a
+# deprecation stub, so prefer `hf` and fall back to the python API.
 if [[ -f /workspace/model/config.json ]]; then
   echo "already present at /workspace/model"
-else
-  HF_HUB_DISABLE_XET=1 huggingface-cli download LiquidAI/LFM2.5-1.2B-Instruct \
+elif command -v hf >/dev/null 2>&1; then
+  HF_HUB_DISABLE_XET=1 hf download LiquidAI/LFM2.5-1.2B-Instruct \
     --local-dir /workspace/model
+else
+  HF_HUB_DISABLE_XET=1 python3 - <<'PY'
+from huggingface_hub import snapshot_download
+snapshot_download("LiquidAI/LFM2.5-1.2B-Instruct", local_dir="/workspace/model")
+PY
 fi
+[[ -f /workspace/model/config.json ]] || { echo "!! model download failed"; exit 1; }
 python3 - <<'PY'
 import json
 c = json.load(open("/workspace/model/config.json"))

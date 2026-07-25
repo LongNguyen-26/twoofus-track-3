@@ -159,9 +159,18 @@ grep -H "RETRIEVAL" "$OUT"/*_needle.log 2>/dev/null | sed "s|$OUT/||"
 cat <<EOF
 
 ACCEPTANCE TEST FOR THIS RIG
-  H0 fresh tpot p50 should land near the portal's 4.07ms and H1 near 5.81ms.
-  The gap matters more than the absolutes: reproducing ~1.74ms means the rig
-  finally models the slice's decode bandwidth and later deltas can be trusted.
+  Use the RATIO, not the absolute times. MPS caps SMs but not the memory
+  subsystem, so 14 SMs on this H100 still pull ~1 TB/s while the real MiG
+  1g.18gb slice has its memory partitioned to ~600 GB/s. Local TPOT will
+  therefore come out below the portal's, and the bf16->fp8 gap will be
+  compressed by roughly the same factor.
+
+    portal ratio  H1/H0 = 5.81 / 4.07 = 1.43
+
+  Reproducing ~1.43 means the rig models the slice's decode mix correctly and
+  later deltas can be trusted. A ratio near 1.0 would mean decode is not
+  bandwidth bound here and nothing measured on this pod transfers.
+
   H4 minus H0 is the local noise floor -- no experiment smaller than that gap
   is real.
 

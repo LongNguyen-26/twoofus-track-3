@@ -48,6 +48,31 @@ must fall roughly 8×. If it does not, MPS is not in force and this pod can only
 produce the same untrustworthy numbers the 4090 did — record that fact rather
 than shipping conclusions from it.
 
+### Measured 25/07 on H100 80GB HBM3 (cap confirmed working)
+
+| | uncapped | capped 12% |
+|---|---|---|
+| SMs visible to torch | 132 | **14** |
+| bf16 GEMM | 801 TFLOPS | **98** (8.2× ✓) |
+| bulk 512MB read | 2936 GB/s | **871** (3.4×) |
+| batch-1 GEMV 8192×2048 | 10.6 µs @ 3171 GB/s | **33.2 µs @ 1011 GB/s** |
+
+Two conclusions:
+
+1. **Batch-1 decode is bandwidth bound, not SM bound, at a MiG-sized SM budget.**
+   The GEMV achieves *more* bandwidth (1011 GB/s) than the bulk reduction, so
+   14 SMs are nowhere near saturated by a batch-1 projection. Halving weight
+   bytes really does halve the weight-read term — the INT4 thesis survives its
+   first gate. Whether Marlin's dequant eats the win is a separate question that
+   only the real kernel probe answers.
+2. **The rig still overstates bandwidth ~1.5×.** MPS partitions SMs but not the
+   memory subsystem, while a real MiG 1g.18gb slice gets ~600 GB/s. So expect
+   local TPOT below the portal's and a compressed bf16→fp8 gap. Judge by the
+   ratio (portal H1/H0 = 5.81/4.07 = **1.43**), never the absolute ms.
+
+`SM_PCT=12` yields 14 SMs; a real 1g slice is ~16, so this is slightly
+conservative. `SM_PCT=13` gives ~17 if you want to bracket it.
+
 ## Experiments, in priority order
 
 ### 1. Nightly source probe — ~2 min, no GPU
