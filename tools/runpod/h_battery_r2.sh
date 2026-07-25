@@ -104,6 +104,16 @@ CFG[H2]='--compilation-config {"cudagraph_mode":"FULL_DECODE_ONLY"}'
 # Three cores shared by the API server, the engine core and torch's OMP pool.
 CFG[H3]="--async-scheduling"
 ENVV[H3]="OMP_NUM_THREADS=1 MKL_NUM_THREADS=1"
+# --- fusion passes: the last untested stock lever -----------------------------
+# The server's own compilation_config dump shows custom_ops=['none'],
+# rms_norm=['native'] and pass_config fuse_norm_quant/fuse_act_quant both False.
+# Those target the ~1.9ms of TPOT that is neither weight bandwidth nor
+# embedding -- roughly 150 small kernels on 16 SMs. Fusing RMSNorm+fp8-quant
+# and SiLU+fp8-quant removes launches and hidden-state round trips on exactly
+# the fp8 path we ship.
+CFG[H5]='--compilation-config {"pass_config":{"fuse_norm_quant":true,"fuse_act_quant":true}}'
+CFG[H6]='--compilation-config {"custom_ops":["+rms_norm","+silu_and_mul"]}'
+CFG[H7]='--compilation-config {"custom_ops":["+rms_norm","+silu_and_mul"],"pass_config":{"fuse_norm_quant":true,"fuse_act_quant":true}}'
 # --- drift control: rerun the anchor last ------------------------------------
 CFG[H4]=""
 
