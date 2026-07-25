@@ -1,0 +1,43 @@
+### submit_029 — submit_020's flags on the newest vLLM nightly.
+###
+### Rationale: version bumps are the only lever that ever produced a large win
+### (submit_012 -> submit_013, v0.22.1 -> v0.25.1, +4.57 on one day and one
+### harness, entirely TTFT). v0.25.1 is 11 days old and is still the newest
+### TAGGED release, so the only untested code is nightly. This tag pins commit
+### 0ba2aa3, which is exactly the tree we source-probed on the H100 pod, so we
+### know it still carries the unconditional hybrid kv-cache-group assert and no
+### spec-decode fix -- this is a pure runtime/kernel A/B, nothing more.
+###
+### Paired with submit_030 (byte-identical submit_020) submitted right after, so
+### the comparison has a same-hour control rather than being read against
+### results from a possibly different harness build.
+###
+### Risk accepted: a nightly could regress or miss the 600s healthcheck. Worst
+### case is one wasted slot; the leaderboard keeps the best submission.
+services:
+  model:
+    image: vllm/vllm-openai:nightly-0ba2aa35a81dcc3246b26291368b53fa2389c7d7
+    entrypoint:
+      - python3 #Don't change this to vllm-server
+      - -m  #Don't change this to vllm-server
+      - vllm.entrypoints.openai.api_server #Don't change this to vllm-server
+    command:
+      - --model=/model #Don't change this to vllm-server
+      - --served-model-name=LFM2.5-1.2B-Instruct #Don't change this to vllm-server
+      - --host=0.0.0.0 #Don't change this to vllm-server
+      - --port=8000 #Don't change this to vllm-server
+      - --max-model-len=32768
+      - --gpu-memory-utilization=0.95
+      - --tensor-parallel-size=1
+      - --enable-prefix-caching
+      - --quantization=fp8
+    ports:
+      - "8000:8000"
+    shm_size: "2g"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]

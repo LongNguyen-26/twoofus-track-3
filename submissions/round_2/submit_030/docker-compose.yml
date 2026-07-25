@@ -1,0 +1,39 @@
+### submit_030 — byte-identical rerun of submit_020, as a same-hour control.
+###
+### Two jobs:
+###  1. Control for submit_029 (nightly). Without a control submitted in the
+###     same window, a nightly result cannot be separated from harness drift.
+###  2. Drift probe. The 25/07 result pages carry a new `tokens_per_sec` field
+###     that was absent on 22/07, which suggests the harness changed again.
+###     Identical config 020 has now scored 63.08 (18/07), 59.15 (22/07) and
+###     61.68 (25/07 03:13); a fourth point taken hours after the third
+###     separates within-day noise from a between-build step.
+###
+### Also a free lottery ticket: the leaderboard keeps the best submission.
+services:
+  model:
+    image: vllm/vllm-openai:v0.25.1
+    entrypoint:
+      - python3 #Don't change this to vllm-server
+      - -m  #Don't change this to vllm-server
+      - vllm.entrypoints.openai.api_server #Don't change this to vllm-server
+    command:
+      - --model=/model #Don't change this to vllm-server
+      - --served-model-name=LFM2.5-1.2B-Instruct #Don't change this to vllm-server
+      - --host=0.0.0.0 #Don't change this to vllm-server
+      - --port=8000 #Don't change this to vllm-server
+      - --max-model-len=32768
+      - --gpu-memory-utilization=0.95
+      - --tensor-parallel-size=1
+      - --enable-prefix-caching
+      - --quantization=fp8
+    ports:
+      - "8000:8000"
+    shm_size: "2g"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
