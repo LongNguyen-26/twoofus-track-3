@@ -38,8 +38,21 @@ done
 
 cat <<'EOF'
 
-PICK the hog setting whose capped bw_gbs lands nearest ~600 GB/s, then confirm
-the rig is finally valid before trusting it for anything:
+TUNE BY THE RATIO, NOT BY ABSOLUTE BANDWIDTH. The hog steals SMs as well as
+bandwidth, so chasing the slice's 600 GB/s on its own just over-starves compute.
+What has to match is gemm_tflops / bw_gbs:
+
+    MiG 1g.18gb on H200   ~115 TFLOPS / ~600 GB/s = 0.19
+    bare 12% cap, no hog    98.6 / 868            = 0.114   (SM starved)
+    hog 60% / 4GB           54.2 / 263            = 0.206   <- best match
+    hog 80% / 8GB           42.1 / 212            = 0.199
+    hog 88% / 12GB          34.9 / 203            = 0.172
+
+The right setting makes the pod a uniformly slower scale model of the slice, so
+latency RATIOS transfer even though absolute milliseconds do not. Prefer the
+lightest hog that matches, since it costs the least wall-clock noise.
+
+Then confirm the rig is finally valid before trusting it for anything:
 
   CUDA_MPS_ACTIVE_THREAD_PERCENTAGE=<pct> HOG_GB=<gb> python3 tools/runpod/bw_hog.py &
   CUDA_MPS_ACTIVE_THREAD_PERCENTAGE=12 python3 tools/runpod/int4_microbench.py --marlin

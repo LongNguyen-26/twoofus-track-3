@@ -52,11 +52,29 @@ else
   SM_STATE="!! UNCAPPED -- MPS daemon not running; SM-hungry options will look better than they are"
 fi
 
+# MPS caps SMs but leaves the whole HBM, so a bare cap makes the pod SM starved
+# where the slice is bandwidth starved -- that is why the first H0/H1 pair came
+# back identical. A competing streaming process restores the missing constraint.
+# Tune by the compute:bandwidth RATIO, not absolute GB/s: the slice runs about
+# 115 TFLOPS against 600 GB/s = 0.19, and HOG_PCT=60 / HOG_GB=4 measured 0.206
+# while a bare cap sits at 0.114. See tools/runpod/rig_bandwidth_tune.sh.
+HOG_PID=""
+if [[ -n "${HOG_PCT:-}" ]]; then
+  CUDA_MPS_ACTIVE_THREAD_PERCENTAGE=$HOG_PCT HOG_GB=${HOG_GB:-4} \
+    python3 tools/runpod/bw_hog.py >"$OUT/bw_hog.log" 2>&1 &
+  HOG_PID=$!
+  sleep 12
+  HOG_STATE="bandwidth hog at ${HOG_PCT}% SMs / ${HOG_GB:-4}GB (pid $HOG_PID)"
+else
+  HOG_STATE="NO bandwidth hog -- rig is SM starved, not bandwidth starved"
+fi
+
 {
   echo "date: $(date -Is)"
   echo "gpu: $(nvidia-smi --query-gpu=name,memory.total --format=csv,noheader)"
   echo "driver: $(nvidia-smi --query-gpu=driver_version --format=csv,noheader | head -1)"
   echo "sm_cap: $SM_STATE"
+  echo "bw_hog: $HOG_STATE"
   echo "cores: $CORES   vram_cap_mb: $VRAM_MB   gpu_frac: $GPU_FRAC"
   echo "vllm: $(python3 -c 'import vllm; print(vllm.__version__)' 2>/dev/null)"
   echo "torch: $(python3 -c 'import torch; print(torch.__version__)' 2>/dev/null)"
@@ -107,10 +125,13 @@ stop_server() {
   [[ -n "$SERVER_PID" ]] && kill -- -"$SERVER_PID" 2>/dev/null
   SERVER_PID=""; sleep 5
 }
-trap 'stop_server; exit 130' INT TERM
+stop_hog() { [[ -n "$HOG_PID" ]] && kill "$HOG_PID" 2>/dev/null; HOG_PID=""; }
+trap 'stop_server; stop_hog; exit 130' INT TERM
+trap 'stop_hog' EXIT
 
 echo
 echo "SM cap: $SM_STATE"
+echo "bw hog: $HOG_STATE"
 
 for id in $ORDER; do
   extra=${CFG[$id]:-}
