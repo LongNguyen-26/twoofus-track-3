@@ -123,6 +123,29 @@ TPOT 4.07ms = 1.74ms (fp8 weight read) + 2.33ms (kernel time, ~16 SMs)
 
 The 2.33ms is **not** host/launch overhead — submit_014 removed that with full CUDA graphs + async scheduling and nothing moved. The BTC slice is MiG 1g.18gb of an H200 = **~16 of 132 SMs**, while every local rig so far was an RTX 4090 with **128 SMs**. The old MiG-sim capped CPU cores and VRAM but never SM count, so it systematically over-valued anything trading SM cycles for bytes — which is exactly how fp8 KV and BNB W4 produced false positives. **From 25/07 the rig must cap SMs (CUDA MPS at ~12%) and must be Hopper**, see `tools/docs/H100_RUNPOD.md`.
 
+### Real weight shapes and the confirmed cost model (25/07, read from safetensors)
+
+Config-derived shapes were wrong (claimed 1.439B linear params for a 1.17B model). The checkpoint headers give:
+
+| tensor | out × in | count | params |
+|---|---|---|---|
+| `w1`, `w3` (MLP gate/up) | 8192 × 2048 | 16 each | 268M each |
+| `w2` (MLP down) | 2048 × 8192 | 16 | 268M |
+| `in_proj` (ShortConv) | 6144 × 2048 | 10 | 126M |
+| `out_proj` (attn o + conv out) | 2048 × 2048 | 16 | 67M |
+| `q_proj` | 2048 × 2048 | 6 | 25M |
+| `k_proj`, `v_proj` | 512 × 2048 | 6 each | 6M each |
+
+**Linears = 1.036B (MLP is 78% of it); tied embedding/lm_head = 0.134B and stays BF16 under `--quantization=fp8`.**
+
+**The slice is bandwidth-bound on linears with no residual tax.** At 600 GB/s: bf16 2.07GB → 3.45ms, fp8 1.04GB → 1.73ms, predicted Δ **1.72ms** versus the portal's measured **1.74ms** (submit_018 − submit_020). A 1% match, so the linear layers run at exactly memory speed and the remaining 2.34ms of TPOT is embedding/lm_head (0.27GB ≈ 0.45ms), KV reads, attention, norms and sampling. This makes the INT4 projection quantitative:
+
+| variant | linear GEMM | TPOT | ERS |
+|---|---|---|---|
+| fp8 (submit_020) | 1.73ms | 4.07 | 63 |
+| INT4 linears | 0.87ms | 3.21 | **69.7** |
+| INT4 + embedding/lm_head | 0.53ms | 2.87 | **72.6** |
+
 ### What each remaining lever can actually buy (25/07)
 
 Scoring at TTFT p50 42ms (`s_ttft` 0.8426) with 1.2% failures:
