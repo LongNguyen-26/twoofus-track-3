@@ -45,31 +45,42 @@ def bench(fn, warmup=10, iters=100):
     return (time.perf_counter() - t0) / iters
 
 
-def linear_shapes(cfg):
-    """Enumerate (name, out_features, in_features, count) for LFM2.5."""
-    h = cfg["hidden_size"]
-    inter = cfg.get("intermediate_size") or cfg.get("block_ff_dim") or 4 * h
-    n_layers = cfg.get("num_hidden_layers", 16)
-    n_heads = cfg.get("num_attention_heads", 32)
-    n_kv = cfg.get("num_key_value_heads", 8)
-    head_dim = cfg.get("head_dim") or h // n_heads
-    # LFM2.5 = full-attention layers at fixed indices, ShortConv elsewhere.
-    attn_idx = cfg.get("full_attn_idxs") or cfg.get("layer_types") or []
-    if isinstance(attn_idx, list) and attn_idx and isinstance(attn_idx[0], str):
-        n_attn = sum(1 for t in attn_idx if "attention" in t)
-    elif isinstance(attn_idx, list) and attn_idx:
-        n_attn = len(attn_idx)
-    else:
-        n_attn = 6
-    n_conv = n_layers - n_attn
-    return [
-        ("mlp.gate_up", 2 * inter, h, n_layers),
-        ("mlp.down", h, inter, n_layers),
-        ("attn.qkv", (n_heads + 2 * n_kv) * head_dim, h, n_attn),
-        ("attn.o", h, n_heads * head_dim, n_attn),
-        ("conv.in_proj", 3 * h, h, n_conv),
-        ("conv.out_proj", h, h, n_conv),
-    ]
+def linear_shapes(model_dir):
+    """Enumerate real 2-D weight shapes straight from the checkpoint.
+
+    Deriving shapes from config.json produced 1.439B "linear" params for a
+    1.17B model -- LFM2.5 does not have one uniform MLP per layer. Read the
+    safetensors headers instead: exact, and it cannot drift from the weights
+    the server actually loads.
+    """
+    import glob
+    import struct
+
+    tensors = {}
+    for path in sorted(glob.glob(os.path.join(model_dir, "*.safetensors"))):
+        with open(path, "rb") as fh:
+            (hlen,) = struct.unpack("<Q", fh.read(8))
+            header = json.loads(fh.read(hlen))
+        for name, meta in header.items():
+            if name == "__metadata__":
+                continue
+            shape = meta.get("shape", [])
+            if len(shape) == 2:
+                tensors[name] = tuple(shape)
+
+    # Group identical shapes and label them by the role in the name.
+    groups = {}
+    embed_params = 0
+    for name, (out_f, in_f) in tensors.items():
+        if "embed" in name or "lm_head" in name:
+            embed_params += out_f * in_f
+            continue
+        label = name.split(".")[-2] if "." in name else name
+        groups.setdefault((label, out_f, in_f), 0)
+        groups[(label, out_f, in_f)] += 1
+
+    shapes = [(lbl, o, i, n) for (lbl, o, i), n in sorted(groups.items())]
+    return shapes, embed_params
 
 
 def bench_bf16(out_f, in_f, m):
@@ -103,38 +114,42 @@ def bench_fp8(out_f, in_f, m):
     return bench(fn), f"torch._scaled_mm(m padded {m}->{mp})"
 
 
-def bench_int4_readfloor(out_f, in_f, m):
-    """Upper bound for ANY int4 kernel: time to merely stream the int4 bytes.
+def bench_readfloor(nbytes):
+    """Time to merely stream `nbytes` -- the floor any kernel reading them obeys.
 
-    Version-proof stand-in for Marlin. If this floor does not beat the measured
-    fp8 GEMM, no packing scheme or kernel can rescue the track.
+    Must use a bf16 reduction, not uint8: torch upcasts uint8 sums to int64,
+    which turns a bandwidth probe into an arithmetic one (the first run reported
+    45 GB/s and produced a nonsense int4 verdict).
     """
-    nbytes = out_f * in_f // 2
-    buf = torch.ones(nbytes, dtype=torch.uint8, device="cuda")
-    return bench(lambda: buf.sum())
+    buf = torch.ones(max(1, nbytes // 2), dtype=torch.bfloat16, device="cuda")
+    return bench(lambda: buf.sum(), warmup=3, iters=20)
 
 
-def try_marlin(out_f, in_f, m):
-    """Real W4A16 Marlin GEMM if this vLLM build exposes a usable helper."""
+def marlin_ops_available():
+    """Report every marlin-ish entry point this build exposes.
+
+    v0.25.1 has no `vllm._custom_ops.gptq_marlin_gemm`, so the first probe could
+    not even name the op it needed. List what exists instead of guessing.
+    """
+    found = []
     try:
-        from vllm.model_executor.layers.quantization.utils import marlin_utils_test as mut
         from vllm import _custom_ops as vops
-        from vllm.scalar_type import scalar_types
+
+        found += [f"vllm._custom_ops.{n}" for n in dir(vops) if "marlin" in n.lower()]
     except Exception as e:
-        return None, f"unavailable ({type(e).__name__})"
+        found.append(f"(vllm._custom_ops import failed: {type(e).__name__})")
     try:
-        w = torch.randn(in_f, out_f, dtype=torch.float16, device="cuda")
-        quant = mut.marlin_quantize(w, scalar_types.uint4b8, 128, act_order=False)
-        q_w, scales = quant[1], quant[2]
-        workspace = mut.MarlinWorkspace(out_f, 64, 256) if hasattr(mut, "MarlinWorkspace") else None
-        x = torch.randn(m, in_f, dtype=torch.float16, device="cuda")
-        fn = lambda: vops.gptq_marlin_gemm(
-            x, q_w, scales, None, None, workspace.scratch, scalar_types.uint4b8,
-            m, out_f, in_f, True, False, False)
-        fn()
-        return bench(fn), "gptq_marlin_gemm"
+        found += [f"torch.ops._C.{n}" for n in dir(torch.ops._C) if "marlin" in n.lower()]
+    except Exception:
+        pass
+    try:
+        import vllm.model_executor.layers.quantization.utils.marlin_utils as mu
+
+        found += [f"marlin_utils.{n}" for n in dir(mu)
+                  if "quantize" in n.lower() or "gemm" in n.lower()]
     except Exception as e:
-        return None, f"probe failed ({type(e).__name__}: {e})"
+        found.append(f"(marlin_utils import failed: {type(e).__name__})")
+    return found
 
 
 def main():
@@ -145,7 +160,7 @@ def main():
     args = ap.parse_args()
 
     cfg = json.load(open(os.path.join(args.model, "config.json")))
-    shapes = linear_shapes(cfg)
+    shapes, embed_params = linear_shapes(args.model)
     props = torch.cuda.get_device_properties(0)
     cap = os.environ.get("CUDA_MPS_ACTIVE_THREAD_PERCENTAGE", "UNCAPPED")
     print(f"# gpu={props.name} sm_count={props.multi_processor_count} sm_cap={cap}")
@@ -153,69 +168,64 @@ def main():
     print()
 
     params = sum(o * i * c for _, o, i, c in shapes)
-    print(f"total linear params: {params / 1e9:.3f}B "
-          f"(bf16 {params * 2 / 1e9:.2f}GB / fp8 {params / 1e9:.2f}GB / "
-          f"int4 {params / 2e9:.2f}GB)")
+    print(f"linear params (from safetensors): {params / 1e9:.3f}B "
+          f"| bf16 {params * 2 / 1e9:.2f}GB / fp8 {params / 1e9:.2f}GB / "
+          f"int4 {params / 2e9:.2f}GB")
+    print(f"embedding/lm_head (stays bf16 under --quantization=fp8): "
+          f"{embed_params / 1e9:.3f}B = {embed_params * 2 / 1e9:.2f}GB/step")
     print()
 
-    header = f"{'shape':<16}{'out':>7}{'in':>7}{'n':>4}{'m':>4}" \
-             f"{'bf16 us':>10}{'fp8 us':>10}{'int4floor':>11}{'fp8 GB/s':>10}"
+    header = f"{'name':<18}{'out':>7}{'in':>7}{'n':>4}{'m':>4}" \
+             f"{'bf16 us':>10}{'fp8 us':>10}{'fp8 GB/s':>10}{'bf16 GB/s':>11}"
     print(header)
     print("-" * len(header))
 
-    totals = {b: {"bf16": 0.0, "fp8": 0.0, "int4": 0.0} for b in BATCHES}
+    totals = {b: {"bf16": 0.0, "fp8": 0.0} for b in BATCHES}
+    read_floor = {"bf16": 0.0, "fp8": 0.0, "int4": 0.0}
     fp8_impl = ""
     for name, out_f, in_f, count in shapes:
-        if count == 0:
-            continue
+        nb = out_f * in_f
+        for pre, div in (("bf16", 0.5), ("fp8", 1.0), ("int4", 2.0)):
+            read_floor[pre] += bench_readfloor(int(nb / div)) * count
         for m in BATCHES:
             t_bf16 = bench_bf16(out_f, in_f, m)
             t_fp8, fp8_impl = bench_fp8(out_f, in_f, m)
-            t_i4 = bench_int4_readfloor(out_f, in_f, m)
             totals[m]["bf16"] += t_bf16 * count
             totals[m]["fp8"] += t_fp8 * count
-            totals[m]["int4"] += t_i4 * count
-            gbs = (out_f * in_f) / t_fp8 / 1e9
-            print(f"{name:<16}{out_f:>7}{in_f:>7}{count:>4}{m:>4}"
-                  f"{t_bf16 * 1e6:>10.1f}{t_fp8 * 1e6:>10.1f}"
-                  f"{t_i4 * 1e6:>11.1f}{gbs:>10.0f}")
+            if m == 1:
+                print(f"{name:<18}{out_f:>7}{in_f:>7}{count:>4}{m:>4}"
+                      f"{t_bf16 * 1e6:>10.1f}{t_fp8 * 1e6:>10.1f}"
+                      f"{nb / t_fp8 / 1e9:>10.0f}{nb * 2 / t_bf16 / 1e9:>11.0f}")
 
     print()
     print(f"fp8 implementation: {fp8_impl}")
     print()
     print("=== per-decode-step totals over all linear layers (ms) ===")
-    print(f"{'batch':>6}{'bf16':>10}{'fp8':>10}{'int4 floor':>12}{'fp8->int4':>12}")
+    print(f"{'batch':>6}{'bf16 gemm':>12}{'fp8 gemm':>12}{'bf16/fp8':>11}")
     for m in BATCHES:
         t = totals[m]
-        gain = (t["fp8"] - t["int4"]) * 1000
-        print(f"{m:>6}{t['bf16'] * 1000:>10.2f}{t['fp8'] * 1000:>10.2f}"
-              f"{t['int4'] * 1000:>12.2f}{gain:>12.2f}")
+        print(f"{m:>6}{t['bf16'] * 1000:>12.2f}{t['fp8'] * 1000:>12.2f}"
+              f"{t['bf16'] / max(t['fp8'], 1e-12):>11.2f}")
+    print()
+    print("=== pure read floors, same bytes, no arithmetic (ms/step) ===")
+    print(f"  bf16 {read_floor['bf16'] * 1000:.2f}   "
+          f"fp8 {read_floor['fp8'] * 1000:.2f}   "
+          f"int4 {read_floor['int4'] * 1000:.2f}")
 
     if args.marlin:
         print()
-        print("=== real Marlin W4A16 probe (gate: >=25% faster than fp8) ===")
-        for name, out_f, in_f, count in shapes[:2]:
-            for m in (1, 4):
-                t_m, note = try_marlin(out_f, in_f, m)
-                t_fp8, _ = bench_fp8(out_f, in_f, m)
-                if t_m is None:
-                    print(f"{name} m={m}: marlin {note}")
-                else:
-                    print(f"{name} m={m}: marlin {t_m * 1e6:.1f}us vs fp8 "
-                          f"{t_fp8 * 1e6:.1f}us -> "
-                          f"{(t_fp8 / t_m - 1) * 100:+.1f}%")
+        print("=== marlin entry points exposed by this build ===")
+        for entry in marlin_ops_available() or ["(none found)"]:
+            print(f"  {entry}")
 
-    b1 = totals[1]
     print()
-    print("=== verdict ===")
-    print(f"measured fp8 weight-read cost at batch 1: {b1['fp8'] * 1000:.2f}ms")
-    print(f"perfect-int4 ceiling saving:              "
-          f"{(b1['fp8'] - b1['int4']) * 1000:.2f}ms")
-    print("Portal TPOT is 4.07ms. Subtract the saving above to get the best case")
-    print("an ideal zero-tax INT4 kernel could reach, then score it:")
-    print("  s_tpot = ((10 - TPOT)/9)^2 ; ERS ~ 0.988 * 0.5 * (0.8426 + s_tpot)")
-    print("Proceed to a vLLM fork ONLY if that lands comfortably above 70 AND")
-    print("the real Marlin probe clears +25%.")
+    print("=== how to read this ===")
+    print("The portal measured bf16/fp8 = 5.81/4.07 = 1.43 on the real slice.")
+    print("If the 'bf16/fp8' column above is far below 1.43, this rig is NOT")
+    print("bandwidth limited the way the slice is -- MPS caps SMs but leaves the")
+    print("full HBM, so byte-saving looks worthless here while it is worth +13")
+    print("points on the portal. In that regime the INT4 question CANNOT be")
+    print("settled locally; only a portal slot can settle it.")
 
 
 if __name__ == "__main__":
