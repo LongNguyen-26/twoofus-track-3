@@ -86,16 +86,83 @@ MiG slice envelope (≈1/7 H200: ~600GB/s, ~120–140 TFLOPS BF16): decode is we
 - **submit_021** (21/07/2026 23:14): 020 + `--kv-cache-dtype=fp8` → **60.64** (−2.4 vs 020). ttft_p50 **51** (up from 42), p95 **66** (up from 59), tbt_median 4 (unchanged), failed 5. **fp8 KV is a NET REGRESSION on the real slice** — the opposite of the 4090 local result. Mechanism: fp8 KV must quantize-on-write during the 4k-token prefill; on the 3-core slice that overhead shows up as +9ms TTFT, while the decode-side KV-read saving is too small to move the integer tbt_median. **Big lesson: small local-4090 latency deltas do NOT transfer to the CPU-starved slice.** Broader pattern now confirmed: bandwidth-via-quantization only wins when there is NO dequant/quant tax — fp8 *weights* win (Hopper native fp8 matmul, zero dequant) but fp8 *KV* loses (quant tax on the weak slice). This directly downgrades the int4-weights idea (Marlin int4 also pays a dequant tax → likely same fate). Drop 021; best stays 020 (63.08).
 - **config_hash decoded**: it is the HARNESS/environment version, NOT our config — 011–014 = `a84041…`, 016–021 = `603c84f…`, the switch aligns exactly with the 17→18/07 harness change (330→420, warmup 90→0). So config_hash never proves our flags took effect, and it confirms all 18/07+ runs share one harness.
 - **K-series pod battery (21/07, 4090 MiG-sim, `tools/runpod/k_battery_r2.sh`) — fp8 KV looked like a small win locally but did NOT transfer (see submit_021).** The KV read (~30% of decode bandwidth at 4k ctx) was bf16 in every prior config; `--kv-cache-dtype fp8` was NEVER tested (spec-decode fixation). Fresh-mode tpot p50: K0 (bf16 KV = 020) **2.53ms** → K1 (fp8 e4m3) **2.38ms** → K2 (fp8_e5m2) 2.39ms — a clean, consistent ~6% cut, same in shared mode (2.39→2.31), TTFT unchanged, **needle RETRIEVAL 2/5 = identical to K0 (no long-context regression → safe from the harness probe)**. e4m3 chosen over e5m2 (more mantissa precision for KV values, same speed). Round-1's "kv-fp8 adds latency" did NOT reproduce here (LFM2.5 geometry + Hopper-class native fp8). → **submit_021 = 020 + `--kv-cache-dtype=fp8`.** Expected portal: +1 to +3 pts (4090's 6% maps to ~4→3.7ms on the slice; if the integer tbt_median tips 4→3 the visible jump is larger). Worst case = 020 (best-of). Needle-cleared, so no dual-path-flag risk.
-- **The 21/07 Final-5 lock is superseded.** The 24/07 leaderboard cutoff is above team best 020, so Final-5 is reopened; `AGENTS.md` is the current source of truth.
-- **Current high-upside plan**: validate suffix D0A/S4/S8/S16/D0B on a pod, require exact greedy equivalence plus a non-regressing needle test and repeatable ≥15% TPOT gain, then publish a custom image only for a winner.
+- **The 21/07 Final-5 lock is superseded.** The 24/07 leaderboard cutoff is above team best 020, so Final-5 is reopened.
+- **22/07 clean portal batch** (all `config_hash=603c84…`, 420 total, 5 failed, tbt 4ms): **022** `--performance-mode=interactivity` **62.39** (TTFT 45/62) / **023** `--max-num-batched-tokens=4096` **61.32** (49/62) / **024** `=2048` **62.91** (42/60) / **025** `--attention-backend=FLASHINFER` **60.52** (51/71). Interactivity and FlashInfer are regressions; 4096 is clearly worse; 2048 ties 020. Scheduler/backend flag tuning is exhausted.
+- **submit_026** (22/07 11:14): byte-identical rerun of 020 → **59.15**, TTFT 53/76, failed 4. −3.93 vs the identical 020 with the same `config_hash`. **Portal run-to-run variance is ±4 points, far bigger than the assumed ±1.**
+- **BTC forum clarifications**: (22/07) all 420 requests scored, no warm-up; `failed_count` = HTTP error, 120s timeout, or connection/parse exception, no retry; custom images built from any vLLM image are allowed, and packaged **draft** weights are allowed. (25/07) **offline/pre-quantized target weights are forbidden** — the mounted `/model` BF16 must be used and only quant-on-the-fly at startup is permitted (`--quantization=fp8` cited as the intended example).
+- **submit_027** (25/07 01:27) `VLLM_USE_V2_MODEL_RUNNER=1` → **58.91** (TTFT 55/77, failed 7) vs a same-morning 020 control **61.68** (50/62) → MRV2 rejected. **submit_028** (03:31) `--quantization=fp8_per_block` → **54.83** (TTFT 65/81) → block-FP8/DeepGEMM rejected for this small dense model at low batch. The new `tokens_per_sec` field is opaque (both rejects cluster at 0.0607 vs the better control's 0.0413) — ignore it until BTC defines it.
+- **Leaderboard 24/07 (screenshot, authoritative — the earlier "rank-8 cutoff 69.44" note was a misread)**: 1 Super Trio **83.32**, 2 sunshine 76.26, 3 CarinaKOn 73.96, 4 MoE 72.56, 5 Son of Horus 71.93, 6 Neko Core 71.57, 7 VTC Go 71.54, **8 LAL 70.47**, 9 MDM 70.24, 10 Tensara 69.58, 11 PNL 69.44, 12 ATQ 69.34, 13 DreamAI 69.27, 14 SemiFAB-1 69.06. Ranks 10–14 are packed inside 0.52 points, so a single good submission moves several places. Team best 020 = **63.08** ⇒ +7.4 to reach rank 8, +6.0 to reach rank 11.
+- **Rejected tracks with measured evidence**: suffix decoding (24/07 — 0/6 greedy equivalence, corrupted output, TPOT +21%, `tools/docs/SUFFIX_FINDINGS_20260724.md`); BitsAndBytes W4 (24/07 — −12.8 ERS, TPOT +36%, `tools/docs/W4_RUNPOD.md`); ngram + ngram_gpu + draft-model spec decode (21/07, all on v0.25.1).
 
-Open questions: are bodies still `temperature=0` (assumed); is a newer vLLM image formally fine as "vLLM" (58.68 graded OK ⇒ de-facto yes, watch the forum).
+### Reading TPOT out of the portal result page (25/07 — do this for every future run)
+
+`tbt_median_ms` is an integer and therefore useless for deltas, but mean TPOT can be recovered from the result page:
+
+`ERS ≈ (1 − fail_rate) × 0.5 × [s_ttft(TTFT_p50) + s_tpot]`
+
+Validated on submit_018: the formula returns 5.81ms and the portal reported `tbt_median 6`. Applied to every 18/07+ run:
+
+| run | ERS | TTFT p50 | implied TPOT |
+|---|---|---|---|
+| 020 | 63.08 | 42 | **4.07ms** |
+| 020 rerun 25/07 | 61.68 | 50 | 4.01ms |
+| 026 | 59.15 | 53 | 4.28ms |
+| 027 MRV2 | 58.91 | 55 | 4.20ms |
+| 028 block-fp8 | 54.83 | 65 | 4.51ms |
+| 018 bf16 | 49.81 | 53 | 5.81ms |
+
+**All ±4 points of portal drift is TTFT; TPOT is pinned at 4.0–4.3ms.** Judge TPOT experiments by this implied statistic, never by raw ERS.
+
+### Decode budget and why local deltas never transferred (25/07)
+
+The 018↔020 pair gives a two-point calibration: Δbf16→fp8 = 1.74ms for 1.2GB less weight traffic ⇒ **effective slice bandwidth ≈ 690GB/s**. So
+
+```
+TPOT 4.07ms = 1.74ms (fp8 weight read) + 2.33ms (kernel time, ~16 SMs)
+```
+
+The 2.33ms is **not** host/launch overhead — submit_014 removed that with full CUDA graphs + async scheduling and nothing moved. The BTC slice is MiG 1g.18gb of an H200 = **~16 of 132 SMs**, while every local rig so far was an RTX 4090 with **128 SMs**. The old MiG-sim capped CPU cores and VRAM but never SM count, so it systematically over-valued anything trading SM cycles for bytes — which is exactly how fp8 KV and BNB W4 produced false positives. **From 25/07 the rig must cap SMs (CUDA MPS at ~12%) and must be Hopper**, see `tools/docs/H100_RUNPOD.md`.
+
+### What each remaining lever can actually buy (25/07)
+
+Scoring at TTFT p50 42ms (`s_ttft` 0.8426) with 1.2% failures:
+
+| target | required TPOT |
+|---|---|
+| 69.44 (rank 11) | 3.25ms (−20%) |
+| 70.47 (rank 8) | 3.12ms (−23%) |
+| 74 (safe margin) | 2.72ms (−33%) |
+| 83.32 (#1 Super Trio) | 1.73ms (−57%) |
+
+Even a magic 10ms TTFT scores only **70.9** at today's 4.07ms TPOT — so TTFT trimming, failed-count hunting and scheduler flags cannot close the gap. Ceilings:
+
+- **INT4 weights**: attacks only the 1.74ms bandwidth term. All linears at zero dequant tax ⇒ TPOT 3.32ms ⇒ **ERS ~68.8**; including the tied embedding/lm_head ⇒ 3.03ms ⇒ **~71.4**. That is *barely* the cutoff, in the perfect case, and Marlin's dequant spends SM cycles — the scarce resource. Keep as priority 2, gated on the microbenchmark.
+- **fastokens**: tokenizing 12k chars ≈1–3ms of TTFT, detokenization ≈20–50µs/token ⇒ realistic ceiling **<1 point**, against an audit surface (tokenizer tampering is explicitly banned). **Dropped.**
+- **Speculative decoding**: 1.8 accepted tokens/step ⇒ TPOT 2.26ms ⇒ **ERS ~78**. The only route above ~72, and every v0.25.1 failure was bug-shaped (assertion, corruption, packaging), not physics. **Priority 1 is re-probing it on newer vLLM.**
+- **Best-of harvesting**: leaderboard takes the max and σ≈2 points, so ~10 reruns of the best config are worth ~+2 in best-of terms. Not a qualification strategy, but leftover daily slots should go here. Reaching rank 8 in best-of terms needs a *true* mean ≈67.5 (+6 real); the ladder will also rise by 30/07, so target **+8 to +10 real**.
+
+### Measurement flaw to fix before trusting any ngram/suffix verdict
+
+`replay_r2.py` uses **synthetic random-token prompts**, so input-copying speculative methods (ngram, prompt-lookup, suffix) have ≈0 acceptance *by construction*. The R1 "ngram CPU loses badly" result is therefore uninformative about the real trace, which is multi-turn QA over ~4k tokens of context — a workload where prompt lookup often wins. Build a realistic document-QA corpus before ruling that family out. (The suffix rejection stands on its own: 0/6 greedy equivalence and corrupted output are prompt-independent.)
+
+- **vLLM versions (checked 25/07)**: **v0.25.1 (14/07) is still the newest tagged release**; v0.25.0 11/07, v0.24.0 29/06, v0.23.0 15/06. Newer code is only reachable via pinned nightly images, e.g. `vllm/vllm-openai:nightly-dd72658e7db0c6a674f473f6f9f0f5c2ebe7e523` (24/07). Version bumps were historically the single biggest win (013: +4.57, all TTFT), so a nightly A/B is cheap and high-value — probe the source first with `tools/runpod/nightly_source_probe.sh`.
+- **Current plan (25–30/07)**: ① Hopper pod with a verified SM cap, reproduce the 018/020 anchors; ② source-probe vLLM main for the `same kv cache group` assertion that blocked draft-model spec decode; ③ INT4 microbenchmark under the SM cap (gate: Marlin ≥25% over native fp8) — no loader patch before it passes; ④ if the assertion is gone, retest a dense draft on the pinned nightly; ⑤ realistic-corpus replay to re-judge ngram/prompt-lookup; ⑥ spend leftover portal slots re-running 020. Do not revisit MRV2, block-FP8, BNB W4, suffix, fp8 KV, FlashInfer, interactivity, or batched-token tuning.
+
+Open question: are bodies still `temperature=0` (assumed). Custom images built from any vLLM image and packaged **draft** weights are formally allowed (22/07); offline/pre-quantized **target** weights are formally forbidden (25/07).
 
 ### Pod experiment protocol (round 2)
 
-Same RunPod pattern as round 1 (`tools/runpod/pod_overnight.sh` header documents it): deploy `vllm/vllm-openai:v0.25.1` with the tiny-model keepalive as Container Start Command, filter hosts CUDA ≥ 13.0, clone the repo into `/workspace/repo`, download `LiquidAI/LFM2.5-1.2B-Instruct` to `/workspace/model` — **with `HF_HUB_DISABLE_XET=1`**: on a network-volume `/workspace` the default hf-xet path deadlocks on `.lock` files / hangs in "Reconstructing" (killed processes leave stale locks that block retries — `pkill -9 -f "hf download" && rm -rf /workspace/model` to recover; xet-disabled download takes ~16s). Then run **`bash tools/runpod/pod_battery_r2.sh`** (configs R0–R7: fp8 baseline, ngram, suffix, full-cudagraph, async-sched, chunk4096, bf16, combo; MiG sim = 3 cores via taskset + VRAM capped to 17.1GB via computed gpu-memory-utilization).
+**The rig changed on 25/07: Hopper + a verified SM cap.** Full runbook and deploy settings in `tools/docs/H100_RUNPOD.md`. Summary: deploy **H100 SXM** ($2.99/hr — same 132 SMs as H200, native fp8; A100 has no fp8 and consumer Blackwell/Ada repeats the 4090 mistake), image `vllm/vllm-openai:v0.25.1`, filter hosts CUDA ≥ 13.0, 60GB container disk, tiny-model keepalive as Container Start Command (the image entrypoint *is* the server, so the pod needs one to stay attachable; it owns port 8000 and batteries run on 8001). Then:
 
-Replay is **`tools/replay/replay_r2.py`** and now scores all 420 requests by default; `--legacy-exclude-marked-warmup` reproduces the historical 330-request policy. It uses synthetic token-sized prompts, closed-loop timing, streaming TTFT/TPOT, and the round-2 score constants.
+```bash
+cd /workspace && git clone <repo> repo && cd repo && bash tools/runpod/pod_setup_h100.sh
+```
+
+That downloads the model — **always with `HF_HUB_DISABLE_XET=1`**: on a network-volume `/workspace` the default hf-xet path deadlocks on `.lock` files / hangs in "Reconstructing" (recover with `pkill -9 -f "hf download" && rm -rf /workspace/model`) — and starts CUDA MPS at 12% SMs. **Check the two `SMCAP_VERIFY` lines before anything else**: `gemm_tflops` must fall ~8×, otherwise MPS is inert and the pod is no better than the 4090. MiG sim is now three things, not two: 3 cores via `taskset`, VRAM capped to 17.1GB via computed `gpu-memory-utilization`, **and ~16 of 132 SMs via MPS**.
+
+Batteries: `h_battery_r2.sh` (H0/H1 = the submit_020 and submit_018 portal anchors, H2 full-decode cudagraphs, H3 async+`OMP_NUM_THREADS=1`, H4 drift control), `int4_microbench.py` (is batch-1 decode bandwidth- or SM-bound; Marlin gate ≥25%), `nightly_source_probe.sh` (has the spec-decode assertion been fixed on vLLM main). Historical 4090 batteries stay under `tools/runpod/` for reference only — their absolute numbers predate the SM cap.
+
+Replay is **`tools/replay/replay_r2.py`** and now scores all 420 requests by default; `--legacy-exclude-marked-warmup` reproduces the historical 330-request policy. It uses closed-loop timing, streaming TTFT/TPOT, and the round-2 score constants, with two seeded prompt regimes bracketing reality: `--mode shared` (per-conv common prefix ≈3.9k tokens → APC best case) and `--mode fresh` (new 4k tokens every turn → APC worst case). **Caveat: prompts are synthetic random tokens, so any method that speculates by copying from the input (ngram, prompt-lookup, suffix) reads as 0% acceptance by construction — this harness cannot evaluate that family.** Local↔portal: ordering transfers, absolutes don't.
 
 ---
 
