@@ -336,6 +336,34 @@ Prize re-estimated from the profile rather than byte counts: ShortConv's 20 BF16
 
 Tags `v4-0251-{fp8all,fp8conv,fp8head}` carry the fix; v1/v2/v3 are frozen (v3 submitted as 036). Submission 039 is 036's config on `v4-0251-fp8all`, gated on a pod run first.
 
+### 27/07 pod — FP8 lm_head VERIFIED working. The mechanism is real.
+
+First run in which a patch actually armed. `results` show, from the engine process:
+
+```
+[lfm25] fp8 lm_head self-test batch1: cosine 0.999962, norm ratio 1.0011, rel err 0.0036, argmax 1.00
+[lfm25] fp8 lm_head self-test random: cosine 0.999097, norm ratio 0.9981, rel err 0.0438, argmax 1.00
+[lfm25] fp8 lm_head self-test rows:   cosine 0.999846, norm ratio 0.9988, rel err 0.0048, argmax 0.94
+[lfm25] fp8 lm_head: ACTIVE (65536x2048, saves 134.2 MB per decode read)
+```
+
+**The gate fix was necessary and is now validated on real weights**: the random case measured rel err **0.0438**, which the original 0.02 bound would have rejected outright. Norm ratio 0.998–1.001 confirms the scale path is correct, argmax 0.94–1.00 confirms token ordering survives.
+
+TPOT, capped 12%, against the mean of the two controls in the same session:
+
+| mode | control mean | patched | Δ |
+|---|---|---|---|
+| fresh | 7.815 | **7.600** | **−0.215ms (−2.8%)** |
+| shared | 6.850 | **6.770** | **−0.080ms (−1.2%)** |
+
+**The bandwidth model is confirmed to 5%**: 134.2 MB at the rig's measured 866 GB/s predicts 0.155ms; the measured mean saving is 0.147ms. Needle unchanged 2/5, coherence sample byte-identical to control.
+
+Fresh beats shared because shared mode raises concurrency (better APC → faster prefill → more requests in flight), and weight reads amortize across a batch. Portal concurrency is 1.3–2.5, i.e. between the two regimes.
+
+Portal projection at its calibrated 500–592 GB/s: **head alone +1.7 to +2.0 ERS; head + ShortConv +3.9 to +4.6.**
+
+**FP8_LINEARS still untested — `install_payload` in the check script only ever wrote `FP8_LMHEAD`.** The earlier fix to that script never applied: the working copy has CRLF line endings and the scripted replacement matched on `\n`. Fixed properly, and the script now asserts on *both* patches being ACTIVE. **Editing a CRLF working-copy file with `\n`-anchored string replacement silently no-ops — use the file-aware editor, and always re-read the file to confirm.**
+
 - **Plan for the remaining slots (26–30/07)**. Stock-flag levers are closed, so slots now buy either portal information about code changes or best-of variance. **26/07, 5 slots in this order**: ① **031** 020 control (morning anchor) → ② **032** `lfm25-custom-serve:v1-n0ba2aa3`, patch inert (gate: proves the custom image serves under the harness, proves the layer is inert, replicates the nightly's +1.32) → ③ **033** `v1-n0ba2aa3-fp8head` → ④ **034** `v1-0251-fp8head` → ⑤ **035** 020 control (closing anchor). That is a 2×2 of {v0.25.1, nightly} × {stock, FP8 head} bracketed by two controls — the minimum that stays readable against ±4-point drift. **If 032 fails to serve, do not submit 033/034**; fall back to reruns of 031. Then: ⑥ record `config_hash` from every result page — the only signal separating drift from noise; ⑦ mirror any nightly finalist before locking the final-5 (already done for `0ba2aa3`); ⑧ ask BTC about median-vs-maximum scoring, the `tokens_per_sec` definition, and the long-context probe threshold. v0.23.0/v0.24.0 remain untested but are now a lower priority than the code track. Do not revisit any row in the closed-lever table above.
 
 **Where the next real lever would have to come from.** After the FP8 head the decode budget reads ≈1.73ms fp8 linears + 0.23ms fp8 head + ~1.9ms of small kernels. That ~1.9ms is now the largest term and nothing has ever measured *inside* it — it is inferred by subtraction, described as "roughly 150 small kernels on 16 SMs". Cross-rig arithmetic hints it splits into a fixed host-side component and an SM-bound component (4090 residual 1.17ms with 128 SMs vs the slice's 2.34ms with 16 ⇒ very roughly ~1.0ms host + ~1.3ms GPU), but that is a two-point extrapolation, not a measurement. **A profile of one decode step on the calibrated H100 rig is the only remaining way to find a lever bigger than +2**, and it is cheap. Do that before spending another session on any lever chosen by reasoning alone — the 26/07 spec-decode session is what that mistake costs.

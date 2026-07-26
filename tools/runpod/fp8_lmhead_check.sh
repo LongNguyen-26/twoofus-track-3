@@ -57,10 +57,11 @@ echo "SM cap: $SM_STATE" | tee "$OUT/rig.txt"
 # Install the exact image payload into this pod's site-packages, which is the
 # same interpreter and the same layout the published image patches.
 SITE=$(python3 -c "import site; print(site.getsitepackages()[0])")
-install_payload() {  # $1 = 1 to enable the patch by default, 0 to ship it inert
+install_payload() {  # $1 = 1 to enable both FP8 patches by default, 0 = inert
   cp docker/lfm25-custom-serve/payload/lfm25_boot.py "$SITE/"
   cp docker/lfm25-custom-serve/payload/lfm25_patches.py "$SITE/"
-  printf 'FP8_LMHEAD = %s\n' "$([ "$1" = 1 ] && echo True || echo False)" \
+  local on; on=$([ "$1" = 1 ] && echo True || echo False)
+  printf 'FP8_LMHEAD = %s\nFP8_LINEARS = %s\n' "$on" "$on" \
     > "$SITE/lfm25_defaults.py"
   printf 'import lfm25_boot\n' > "$SITE/lfm25_serve.pth"
   python3 -c 'import sys' 2>&1 | grep -q 'autopatch armed' \
@@ -116,9 +117,15 @@ run_case() {  # $1 = tag, $2 = enable patch
     echo "$1: SERVER DID NOT START -- see $OUT/$1.server.log" | tee -a "$OUT/summary.txt"
     stop_server; stop_hog; return
   fi
-  if [ "$2" = 1 ] && ! grep -q 'fp8 lm_head: ACTIVE' "$OUT/$1.patch.log"; then
-    echo "$1: PATCH NOT ACTIVE -- treat every number below as the stock baseline" \
-      | tee -a "$OUT/summary.txt"
+  if [ "$2" = 1 ]; then
+    # Assert on BOTH patches. A silent no-op reads exactly like a patch that
+    # does nothing, and the portal returns no logs -- that cost three slots on
+    # 26-27/07, and then a whole pod run in which FP8_LINEARS was never even
+    # written into the defaults file.
+    grep -q 'fp8 lm_head: ACTIVE' "$OUT/$1.patch.log" \
+      || echo "$1: !! lm_head patch NOT ACTIVE" | tee -a "$OUT/summary.txt"
+    grep -q 'fp8 linears: ACTIVE' "$OUT/$1.patch.log" \
+      || echo "$1: !! ShortConv linears patch NOT ACTIVE" | tee -a "$OUT/summary.txt"
   fi
   for mode in fresh shared; do
     echo "--- replay mode=$mode ---"
