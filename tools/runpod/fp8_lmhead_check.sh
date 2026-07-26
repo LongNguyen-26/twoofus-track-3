@@ -96,7 +96,9 @@ start_server() {  # $1 = run tag
     curl -sf "$URL/v1/models" >/dev/null 2>&1 && break
     sleep 5
   done
-  grep -E '^\[lfm25\]' "$log" | tee "$OUT/$1.patch.log"
+  # NOT anchored with ^: vLLM prefixes subprocess stderr with
+  # "(EngineCore pid=NNNN) " and the engine process is the one that patches.
+  grep -F '[lfm25]' "$log" | sort -u | tee "$OUT/$1.patch.log"
 }
 stop_server() {
   [ -n "$SERVER_PID" ] && kill "$SERVER_PID" 2>/dev/null

@@ -104,7 +104,11 @@ trap 'stop; stop_hog; exit 130' INT TERM
 
 report_env() {  # $1 = log
   grep -i "Asynchronous scheduling is" "$1" | tail -1 | sed 's/^/  /'
-  grep -E '^\[lfm25\]' "$1" | sed 's/^/  /'
+  # NOT anchored with ^: vLLM prefixes subprocess stderr with
+  # "(EngineCore pid=NNNN) ", and the engine process is the one that installs
+  # the patch. An anchored grep silently hides exactly the line that says
+  # whether the patch armed -- which is what happened on the 26/07 run.
+  grep -F '[lfm25]' "$1" | sort -u | sed 's/^/  /'
 }
 
 start_hog
