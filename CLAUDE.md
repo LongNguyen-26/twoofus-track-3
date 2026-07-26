@@ -211,9 +211,62 @@ The nightly trades a little TTFT (54 vs 51) for **−0.27ms TPOT (−6.5%)**, ne
 
 **Version coverage is a real gap.** Only v0.22.1 and v0.25.1 have ever been submitted. **v0.23.0 and v0.24.0 have never been tested**, and the single controlled comparison we own (012 fp8 54.11 vs 013 fp8 58.68, same morning, same harness) shows only that v0.22.1 is worse — it does not establish that newest is best. The v0.22.1→v0.25.1 gain was entirely TTFT (85→66ms p50) and is plausibly the v0.25.0 hybrid-APC work, which v0.23/v0.24 predate, so the prior for an older version winning is low but untested. Nightly builds newer than v0.25.1 also exist, pinned by commit (`nightly-0ba2aa35a81dcc3246b26291368b53fa2389c7d7` = the tree source-probed on 25/07).
 
-- **Plan for the remaining slots (26–30/07)**. All local questions are closed, so every slot buys portal information. The version axis is the only live one and it just paid, so exploit it with bracketed controls rather than single shots. **26/07, 5 slots in this order**: ① 020 control (morning anchor) → ② newest available nightly → ③ v0.24.0 with 020's flags (closes the version gap and tests the older-is-stabler hypothesis directly) → ④ nightly `0ba2aa3` again (replicates today's +1.32) → ⑤ 020 control (afternoon anchor). Two controls bracketing three treatments is what makes any of it readable given ±1–2 point drift. Then: ⑥ record `config_hash` from every result page — it is the only signal separating drift from noise; ⑦ mirror any nightly finalist with `crane copy` before locking the final-5; ⑧ ask BTC about median-vs-maximum scoring, the `tokens_per_sec` definition, and the long-context probe threshold. Do not revisit any row in the closed-lever table below.
-
 Open question: are bodies still `temperature=0` (assumed). Custom images built from any vLLM image and packaged **draft** weights are formally allowed (22/07); offline/pre-quantized **target** weights are formally forbidden (25/07).
+
+### 26/07 — the custom-image track opens: FP8 lm_head
+
+**`--quantization=fp8` never touches the output head, and that head is 0.45ms of the 4.07ms TPOT.** `Fp8Config.get_quant_method` returns an FP8 method only for `LinearBase` (plus MoE/Attention); `ParallelLMHead` subclasses `VocabParallelEmbedding`, so it falls through to `UnquantizedEmbeddingMethod` and keeps BF16 weights — verified against vLLM source on 26/07, and consistent with the safetensors accounting (1.036B linear params quantized, 0.134B tied embedding/lm_head not). Every decode step reads 65536×2048×2 = **0.268 GB** to produce logits, ≈0.45ms at the slice's ~600 GB/s. Halving it projects TPOT 4.07 → 3.85ms, **≈ +1.6 ERS**; stacked on the nightly's measured −0.27ms it projects ≈3.6ms and ≈ +3.5 over a 020-class run at equal TTFT.
+
+This is the last unexploited item in the only class of change that has ever transferred to this portal — **fewer bytes read per step with no dequant/quant tax**. It is the same native Hopper W8A8 path that paid +13 on the linears, applied to the tensor vLLM skips. Legal under BTC's 25/07 ruling: quantization happens on the fly at startup from the mounted BF16, nothing is pre-quantized, and the original BF16 tensor stays resident so the tied *input* embedding lookup is bit-identical to stock (cost: 134MB of VRAM, taken before memory profiling, so the KV pool shrinks <1%).
+
+**Image: `nguyenlong26/lfm25-custom-serve`, public, four tags** — `{v1-0251, v1-n0ba2aa3} × {stock, -fp8head}`, built by `crane append` of a 15KB Python layer onto digest-pinned bases. Source, rebuild recipe and design notes: `docker/lfm25-custom-serve/README.md`. Mirroring the nightly into our own repo also kills the tag-persistence risk (Docker Hub prunes commit-pinned nightlies after ~9 days).
+
+Design points worth keeping:
+- **`.pth`, not `sitecustomize.py`** — the base image ships a `sitecustomize` earlier on `sys.path` that shadows ours (round-1 lesson).
+- **Deterministic post-import hook**, not a "tick on the next import" trigger: the finder wraps the loader for `vllm.v1.worker.gpu_model_runner` so the patch arms the instant that module executes. Also: **never `sys.meta_path.remove()` from inside `find_spec`** — mutating the list mid-iteration makes the import system skip the next finder.
+- **The default is baked into the tag, not passed via `environment:`** — it is unknown whether the harness forwards compose env, and the harness already rewrites the entrypoint. Finding out costs a slot.
+- **Three-layer fail-open**: arm-or-skip if `load_model`'s signature moved; a startup self-test against the stock BF16 head (cosine ≥ 0.999, max rel err ≤ 2%, argmax match, on real head rows + random hidden states + batch 1) that rolls the patch back; and a permanent runtime revert on any exception. Worst realistic case is the stock sibling's score.
+- **No request-dependent branching** — after startup it is all-FP8 or all-BF16. "Dual-path mechanisms" are named in the anti-cheat rules and submit_015 was aborted online with exactly that flag.
+- Grep container logs for `[lfm25]`: `fp8 lm_head: ACTIVE` vs `REJECTED by self-test`.
+
+**Gate note**: exact greedy equivalence is the wrong test here. That gate exists for speculative decoding, which is lossless by construction (which is how ngram's token duplication was caught). Quantization is *expected* to move tokens; the gates are needle-no-worse, coherent output, and TPOT down. Pod script: `tools/runpod/fp8_lmhead_check.sh` (F0 inert → F1 patched → F2 drift control).
+
+**Unvalidated on GPU when submitted.** The open question the portal answers is speed, not correctness: whether `torch._scaled_mm` with row-wise scales beats a BF16 GEMV at batch 1 on 16 SMs. If TPOT does not move, the patch is dead.
+
+### 26/07 — speculative decoding REOPENS: the vLLM bug behind submit_015 is found
+
+**It is an asymmetric guard, not an architectural limit.** Source read on the v0.25.1 tree in `scratch/vllm0251_src/`:
+
+- **Insert** (`gpu_model_runner.py:1317`, `_update_states`): whenever async scheduling is on and the previous step drafted, `req_state.output_token_ids.extend([-1] * optimistic_num_accepted)`.
+- **Repair** (`gpu_input_batch.py:1019`, `update_async_output_token_ids`): returns at its first line unless `sampling_metadata.output_token_ids` is populated, which needs `not no_penalties or bad_words_token_ids or logitsprocs_need_output_token_ids or thinking_budget_tracks_reqs`.
+
+The graded workload is greedy with no penalties, no bad words, no custom logits processors, no thinking budget ⇒ that flag is **False** ⇒ the repair never runs ⇒ the `-1` placeholders stay forever in `req_state.output_token_ids`, which is the *same list object* as `input_batch.req_output_token_ids[idx]` (`gpu_input_batch.py:345`), synced into `token_ids_cpu` and copied to the GPU as both the n-gram matching corpus and the request's own token history. vLLM's repair code even documents the case ("async spec decode adds optimistic placeholders that may exceed the actual acceptance count") — it just sits inside the guard our workload never passes.
+
+**Async scheduling defaults to ON** (`config/vllm.py:992`: "Enable async scheduling unless there is an incompatible option") and is auto-disabled for spec decode **except** Eagle types, `dspark`, and `NgramGPUTypes = Literal["ngram_gpu"]`. That splits our two failures cleanly:
+
+| method | async scheduling | optimistic path | our evidence |
+|---|---|---|---|
+| `ngram_gpu` | **stays ON** | **ACTIVE**, never repaired | submit_015 — harness abort, long-context probe 0% |
+| `ngram` (CPU) | auto-**disabled** | inert | 25/07 pod — 1/6 equivalence, duplicated tokens = a **separate** bug, NOT fixed by this patch |
+
+The other `-1` append (`gpu_model_runner.py:4786`) is inside `_pp_broadcast_prev_sampled_token_ids` — pipeline-parallel only, cannot fire at PP=1.
+
+**Two corrections to this file's record:**
+
+1. **submit_014's `--async-scheduling` was a no-op.** With no spec decode our config falls to `else: async_scheduling = True`, so async has been on in *every* submission. The conclusion "the residual is not host overhead" survives — and is in fact strengthened, since async has been hiding host overhead all along and TPOT is still 4.07ms — but 014 never demonstrated it; the default did.
+2. **The 17/07 "CPU ngram loses badly" number (TPOT 2.47 → 3.43ms) is contaminated.** Enabling CPU ngram makes vLLM *silently disable async scheduling*, so part of that 0.96ms penalty is losing async, not the cost of ngram. Combined with the already-known problem that the replay corpus is synthetic random tokens (prompt-lookup cannot accept by construction), that measurement says nothing.
+
+**The fix** is to let the existing repair run when there is anything to repair: store the sampled-token refs unconditionally, and iterate `req_output_token_ids` directly instead of bailing on an empty `sampling_metadata.output_token_ids`. Self-limiting — a request with no `-1` tail is skipped *before* any GPU sync, so with spec decode off it is a bare loop over a few list tails per step and async scheduling is not harmed. Shipped as `LFM25_FIX_ASYNC_SPEC` in `lfm25_patches.py`; 13 unit tests in the repair's contract (overshoot shrinks, undershoot clamps, no-placeholder path performs no sync, stock path still delegates) pass without a GPU.
+
+**Image tags — v1 tags are frozen because submissions used them** (BTC bans swapping an image after submitting). New work goes to `v2-*`: `v2-0251-specfix`, `v2-0251-fp8head-specfix`, `v2-n0ba2aa3-specfix`, all public.
+
+**Gate: exact greedy equivalence 6/6, no exceptions.** Speculative decoding is lossless by construction, so anything less means a bug remains. `tools/runpod/specfix_check.sh` runs three arms — B0 reference, **B1 ngram_gpu unpatched which MUST FAIL** (if it passes, the diagnosis is wrong and B2 proves nothing), B2 patched which must be 6/6 — plus TPOT and needle. Do not test CPU ngram with this patch; it addresses a different defect.
+
+**Expected value is unknown and depends on acceptance rate**, which has never been measurable locally (synthetic corpus). At ~1.8 accepted tokens/step TPOT ≈ 2.26ms ⇒ ERS ≈ 78. At low acceptance it is a wash or a loss. What has changed is only that the track was closed for the wrong reason.
+
+- **Plan for the remaining slots (26–30/07)**. Stock-flag levers are closed, so slots now buy either portal information about code changes or best-of variance. **26/07, 5 slots in this order**: ① **031** 020 control (morning anchor) → ② **032** `lfm25-custom-serve:v1-n0ba2aa3`, patch inert (gate: proves the custom image serves under the harness, proves the layer is inert, replicates the nightly's +1.32) → ③ **033** `v1-n0ba2aa3-fp8head` → ④ **034** `v1-0251-fp8head` → ⑤ **035** 020 control (closing anchor). That is a 2×2 of {v0.25.1, nightly} × {stock, FP8 head} bracketed by two controls — the minimum that stays readable against ±4-point drift. **If 032 fails to serve, do not submit 033/034**; fall back to reruns of 031. Then: ⑥ record `config_hash` from every result page — the only signal separating drift from noise; ⑦ mirror any nightly finalist before locking the final-5 (already done for `0ba2aa3`); ⑧ ask BTC about median-vs-maximum scoring, the `tokens_per_sec` definition, and the long-context probe threshold. v0.23.0/v0.24.0 remain untested but are now a lower priority than the code track. Do not revisit any row in the closed-lever table above.
+
+**Where the next real lever would have to come from.** After the FP8 head the decode budget reads ≈1.73ms fp8 linears + 0.23ms fp8 head + ~1.9ms of small kernels. That ~1.9ms is now the largest term and nothing has ever measured *inside* it — it is inferred by subtraction, described as "roughly 150 small kernels on 16 SMs". Cross-rig arithmetic hints it splits into a fixed host-side component and an SM-bound component (4090 residual 1.17ms with 128 SMs vs the slice's 2.34ms with 16 ⇒ very roughly ~1.0ms host + ~1.3ms GPU), but that is a two-point extrapolation, not a measurement. **A torch/NSys profile of one decode step on the calibrated H100 rig is the only remaining way to find a lever bigger than +2**, and it is cheap. Do that before spending another session on any lever chosen by reasoning alone.
 
 ### Pod experiment protocol (round 2)
 

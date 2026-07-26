@@ -1,0 +1,52 @@
+### submit_034 — the same FP8 lm_head patch, on the v0.25.1 base instead.
+###
+### Image: nguyenlong26/lfm25-custom-serve:v1-0251-fp8head
+###   = vllm/vllm-openai:v0.25.1
+###     (digest sha256:e4f88a835143cd22aee2397a26ec6bb80b3a4a6fe0c882bcbc63822904766089)
+###   + the same layer as submit_033, default ON.
+###
+### This completes a 2x2 over the day: {v0.25.1, nightly} x {stock, FP8 head}.
+###
+###                     stock head        FP8 head
+###   v0.25.1           031 / 035          034
+###   nightly           032                033
+###
+### Two treatments and two base versions cannot be separated from a single pair
+### when run-to-run drift is +/-4 points; four cells plus two controls can. It
+### also answers the cheaper question directly: if the patch pays on both bases
+### by a similar margin, it is the patch, and the base choice can then be made
+### on its own merits.
+###
+### Hedge, too. The nightly is a commit-pinned build with no release testing
+### behind it, and only one portal measurement. If it turns out to be flaky, or
+### if Docker Hub prunes the upstream tag, this cell keeps the FP8-head result
+### alive on the release that has served every graded submission since 17/07.
+###
+### Submit AFTER submit_033, and only if submit_032 served successfully.
+services:
+  model:
+    image: nguyenlong26/lfm25-custom-serve:v1-0251-fp8head
+    entrypoint:
+      - python3 #Don't change this to vllm-server
+      - -m  #Don't change this to vllm-server
+      - vllm.entrypoints.openai.api_server #Don't change this to vllm-server
+    command:
+      - --model=/model #Don't change this to vllm-server
+      - --served-model-name=LFM2.5-1.2B-Instruct #Don't change this to vllm-server
+      - --host=0.0.0.0 #Don't change this to vllm-server
+      - --port=8000 #Don't change this to vllm-server
+      - --max-model-len=32768
+      - --gpu-memory-utilization=0.95
+      - --tensor-parallel-size=1
+      - --enable-prefix-caching
+      - --quantization=fp8
+    ports:
+      - "8000:8000"
+    shm_size: "2g"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]

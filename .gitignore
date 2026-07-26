@@ -24,3 +24,6 @@ scratch/
 *.png
 experiment_log.txt
 .env
+
+# Image build artifacts (regenerate with build_layer.py)
+docker/*/build/

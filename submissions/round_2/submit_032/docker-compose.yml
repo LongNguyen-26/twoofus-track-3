@@ -1,0 +1,62 @@
+### submit_032 — first custom image, with every patch inert. A gate, not a bet.
+###
+### Image: nguyenlong26/lfm25-custom-serve:v1-n0ba2aa3
+###   = vllm/vllm-openai:nightly-0ba2aa35a81dcc3246b26291368b53fa2389c7d7
+###     (digest sha256:eb8ef8411fd6d7a4ced0b98cf428d8998d4549a84b3d0d02f941e74dbcb0f6ce)
+###   + one 15 KB layer of Python, shipped with its default switched OFF.
+###
+### Three jobs, all of which have to be settled before a patched image is worth
+### a slot:
+###
+###  1. Prove the custom image serves at all under the BTC harness. The harness
+###     forces the entrypoint `python3 -m vllm.entrypoints.openai.api_server`
+###     (round 1, submit_003), so any image change is a spawn-time risk. If this
+###     scores in the normal band, the packaging is sound and a later bad score
+###     from submit_033/034 is attributable to the patch, not the image.
+###
+###  2. Prove the added layer is genuinely inert. With LFM25_FP8_LMHEAD off the
+###     shim only installs an import hook and returns, so this should reproduce
+###     stock nightly behaviour. Read against submit_029 (61.83, TPOT 3.87ms),
+###     which is the same nightly without the layer.
+###
+###  3. Replicate the only TPOT win of the round. submit_029 beat its same-hour
+###     control by 1.32 points and by 0.27ms of TPOT — a single paired sample,
+###     with 029's 3.87ms sitting below all four measurements of config 020
+###     (4.07 / 4.01 / 4.28 / 4.14). One sample is suggestive, not settled.
+###
+### Bonus: mirroring the nightly into our own repository removes the tag
+### persistence risk. Docker Hub has been pruning commit-pinned nightlies after
+### about nine days, so a final-5 pick referencing the upstream tag could become
+### unservable before hậu kiểm. This copy is byte-identical to that base plus an
+### inert layer, so it adds no audit surface. Custom images built from any vLLM
+### image are explicitly allowed (BTC forum, 22/07).
+###
+### If this fails to serve, do NOT submit 033 or 034 — fall back to reruns of
+### submit_031.
+services:
+  model:
+    image: nguyenlong26/lfm25-custom-serve:v1-n0ba2aa3
+    entrypoint:
+      - python3 #Don't change this to vllm-server
+      - -m  #Don't change this to vllm-server
+      - vllm.entrypoints.openai.api_server #Don't change this to vllm-server
+    command:
+      - --model=/model #Don't change this to vllm-server
+      - --served-model-name=LFM2.5-1.2B-Instruct #Don't change this to vllm-server
+      - --host=0.0.0.0 #Don't change this to vllm-server
+      - --port=8000 #Don't change this to vllm-server
+      - --max-model-len=32768
+      - --gpu-memory-utilization=0.95
+      - --tensor-parallel-size=1
+      - --enable-prefix-caching
+      - --quantization=fp8
+    ports:
+      - "8000:8000"
+    shm_size: "2g"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]

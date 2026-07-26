@@ -1,0 +1,51 @@
+### submit_035 — closing control. Byte-identical to submit_031.
+###
+### Submit LAST, hours after submit_031. Together they bracket the three
+### custom-image treatments, which is what makes the day readable: any shared
+### movement between 031 and 035 is drift and has to be subtracted from
+### 032/033/034 before believing a treatment effect.
+###
+### It is also the noise measurement asked for. The 020-equivalent set stands at
+### eight runs — 63.08, 62.91, 62.39, 62.00, 61.93, 61.68, 61.32, 59.15 — mean
+### 61.8, sd 1.2, but with a 3.93-point gap between two runs that carried the
+### same config_hash. Samples 9 and 10 taken the same day, hours apart, separate
+### within-day noise from the between-build steps that have twice been mistaken
+### for it (17->18/07 changed total_count 330->420 and moved identical config
+### 013 from 58.68 to 63.08).
+###
+### Record `config_hash` from both result pages. It identifies the harness
+### build, never our flags, and it is the only field that distinguishes drift
+### from noise.
+###
+### Worth knowing what this measurement is for: if the leaderboard advances on
+### the maximum, sd 1.2 means roughly +1.5 points are available from reruns
+### alone; if BTC's final score is the median of several re-runs of a finalist
+### image, as the rules allow, reruns are worth exactly zero and every remaining
+### slot belongs to real mechanisms. That question is worth asking on the forum.
+services:
+  model:
+    image: vllm/vllm-openai:v0.25.1
+    entrypoint:
+      - python3 #Don't change this to vllm-server
+      - -m  #Don't change this to vllm-server
+      - vllm.entrypoints.openai.api_server #Don't change this to vllm-server
+    command:
+      - --model=/model #Don't change this to vllm-server
+      - --served-model-name=LFM2.5-1.2B-Instruct #Don't change this to vllm-server
+      - --host=0.0.0.0 #Don't change this to vllm-server
+      - --port=8000 #Don't change this to vllm-server
+      - --max-model-len=32768
+      - --gpu-memory-utilization=0.95
+      - --tensor-parallel-size=1
+      - --enable-prefix-caching
+      - --quantization=fp8
+    ports:
+      - "8000:8000"
+    shm_size: "2g"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]

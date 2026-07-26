@@ -1,0 +1,96 @@
+### submit_033 — FP8 lm_head. The one tensor `--quantization=fp8` never touches.
+###
+### Image: nguyenlong26/lfm25-custom-serve:v1-n0ba2aa3-fp8head
+###   (same nightly base as submit_032, patch default switched ON)
+###
+### The gap in stock vLLM
+### ---------------------
+### `Fp8Config.get_quant_method` only returns an FP8 method for `LinearBase`
+### (and MoE / Attention). The output head is a `ParallelLMHead`, which
+### subclasses `VocabParallelEmbedding`, so it falls through and keeps BF16
+### weights. Verified against vLLM source, and it matches what the safetensors
+### headers say: 1.036B linear parameters get quantized, and the 0.134B tied
+### embedding / lm_head does not.
+###
+### What that costs, in the units the scoreboard pays in
+### ----------------------------------------------------
+### Every decode step reads the entire head to produce logits over the 65,536
+### token vocabulary: 65536 x 2048 x 2 bytes = 0.268 GB. At the slice's measured
+### ~600 GB/s that is 0.45 ms, inside a measured TPOT of 4.07 ms:
+###
+###     4.07 ms = 1.73 (FP8 linears) + 0.45 (BF16 head) + ~1.9 (small kernels)
+###
+### That budget is not a guess. The bf16/fp8 pair submit_018 vs submit_020
+### predicted a 1.72 ms saving from byte counts and the portal paid 1.74 ms —
+### 1% agreement — which is what makes the 0.45 ms term trustworthy too.
+###
+### Halving the head read should give TPOT 4.07 -> 3.85 ms, s_tpot 0.434 ->
+### 0.468, worth about +1.6 points on its own. On this base it stacks with the
+### nightly's measured -0.27 ms (submit_029 vs its same-hour control), for a
+### projected TPOT near 3.6 ms and roughly +3.5 over a 020-class run at equal
+### TTFT.
+###
+### Why this lever and not another
+### ------------------------------
+### It is the last untouched item in the only class of change that has ever
+### transferred from theory to this portal: fewer bytes read per step, with no
+### dequantization tax. FP8 weights paid +13. FP8 KV lost (quantize-on-write tax
+### during prefill). INT4/Marlin lost by 1.63x (dequant to fp16 before fp16
+### tensor cores). The head is the same native-FP8 W8A8 path as the linears —
+### Hopper does it with zero dequant — applied to a tensor vLLM happens to skip.
+###
+### Legality
+### --------
+### Quantization happens on the fly at startup from the mounted BF16 weights,
+### which is the form BTC sanctioned on 25/07 ("chỉ được lượng tử hoá on-the-fly
+### lúc khởi động"). Nothing is pre-quantized offline, no weight file is
+### touched, and the original BF16 tensor stays resident so the tied *input*
+### embedding lookup remains bit-identical to stock. Custom images built from a
+### vLLM image are allowed (BTC forum, 22/07).
+###
+### There is no request-dependent branching, which is the behaviour the
+### anti-cheat rules call a dual path: after startup either every token goes
+### through FP8 or, if the startup self-test rejects the patch, every token goes
+### through stock BF16.
+###
+### Risk
+### ----
+### Unvalidated on GPU — no local hardware, and the H100 rig would cost a
+### session. Contained three ways:
+###   * a startup self-test compares the FP8 head against the stock BF16 head on
+###     real rows of the head, on random hidden states, and at batch 1, and
+###     rolls the patch back unless cosine >= 0.999, max relative error <= 2%,
+###     and the argmax matches;
+###   * any exception inside the fast path permanently reverts to BF16;
+###   * worst realistic case is therefore submit_032's score, not a failure.
+### The open question the portal answers is speed, not correctness: whether
+### `torch._scaled_mm` with row-wise scales beats a BF16 GEMV at batch 1 on 16
+### SMs. If TPOT does not move, the patch is dead and the lever space really is
+### closed.
+services:
+  model:
+    image: nguyenlong26/lfm25-custom-serve:v1-n0ba2aa3-fp8head
+    entrypoint:
+      - python3 #Don't change this to vllm-server
+      - -m  #Don't change this to vllm-server
+      - vllm.entrypoints.openai.api_server #Don't change this to vllm-server
+    command:
+      - --model=/model #Don't change this to vllm-server
+      - --served-model-name=LFM2.5-1.2B-Instruct #Don't change this to vllm-server
+      - --host=0.0.0.0 #Don't change this to vllm-server
+      - --port=8000 #Don't change this to vllm-server
+      - --max-model-len=32768
+      - --gpu-memory-utilization=0.95
+      - --tensor-parallel-size=1
+      - --enable-prefix-caching
+      - --quantization=fp8
+    ports:
+      - "8000:8000"
+    shm_size: "2g"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
