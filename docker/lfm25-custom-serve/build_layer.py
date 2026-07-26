@@ -39,12 +39,17 @@ PTH = "import lfm25_boot\n"
 # baking the default means a submission does not depend on the grading harness
 # passing `environment:` through from docker-compose.yml.
 VARIANTS = {
-    "stock": {"FP8_LMHEAD": False, "FIX_ASYNC_SPEC": False},
-    "fp8head": {"FP8_LMHEAD": True, "FIX_ASYNC_SPEC": False},
+    "stock": {"FP8_LMHEAD": False, "FP8_LINEARS": False, "FIX_ASYNC_SPEC": False},
+    "fp8head": {"FP8_LMHEAD": True, "FP8_LINEARS": False, "FIX_ASYNC_SPEC": False},
+    # ShortConv in_proj/out_proj only -- isolates the larger of the two
+    # bandwidth gaps from the lm_head one.
+    "fp8conv": {"FP8_LMHEAD": False, "FP8_LINEARS": True, "FIX_ASYNC_SPEC": False},
+    # Both bandwidth gaps closed: 302 MB less read per decode step.
+    "fp8all": {"FP8_LMHEAD": True, "FP8_LINEARS": True, "FIX_ASYNC_SPEC": False},
     # The spec-decode fix only does anything when the compose also passes
-    # --speculative-config with method=ngram_gpu; on its own it is inert.
-    "specfix": {"FP8_LMHEAD": False, "FIX_ASYNC_SPEC": True},
-    "fp8head-specfix": {"FP8_LMHEAD": True, "FIX_ASYNC_SPEC": True},
+    # --speculative-config with method=ngram_gpu; on its own it is inert, and
+    # the 26/07 pod showed it does not fix the corruption. Retained, not shipped.
+    "specfix": {"FP8_LMHEAD": False, "FP8_LINEARS": False, "FIX_ASYNC_SPEC": True},
 }
 
 DEFAULTS_HEADER = '''"""Per-image defaults, baked at build time.

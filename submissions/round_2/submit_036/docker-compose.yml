@@ -1,0 +1,83 @@
+### submit_036 — close BOTH bandwidth gaps that `--quantization=fp8` leaves open.
+###
+### Image: nguyenlong26/lfm25-custom-serve:v3-0251-fp8all
+###   = vllm/vllm-openai:v0.25.1 @ sha256:e4f88a83…  + the patch layer,
+###     with FP8_LINEARS and FP8_LMHEAD both on.
+###
+### What the 26/07 decode profile found
+### -----------------------------------
+### Kernel counts per decode step matched the architecture exactly:
+###   44 cutlass FP8 GEMMs  = 16 MLP x2 + 6 attention x2
+###   20 cuBLAS BF16 GEMMs  = 10 ShortConv x2  (in_proj + out_proj)
+###    1 cuBLAS BF16 GEMM   = lm_head
+### So twenty-one of the sixty-five GEMMs in this model run in BF16 while the
+### flag says fp8.
+###
+### Confirmed in vLLM source, not inferred: `ShortConv.__init__`
+### (layers/mamba/short_conv.py) does not even accept a `quant_config`, and
+### `Lfm2ShortConvDecoderLayer` never passes one, so `in_proj`
+### (MergedColumnParallelLinear) and `out_proj` (RowParallelLinear) always fall
+### back to `UnquantizedLinearMethod`. Separately, `Fp8Config.get_quant_method`
+### only handles `LinearBase`, and `ParallelLMHead` subclasses
+### `VocabParallelEmbedding`, so the head is skipped too.
+###
+### The bytes
+### ---------
+###   ShortConv  10 x [6144, 2048] + 10 x [2048, 2048] = 167.8M params = 335 MB
+###   lm_head            [65536, 2048]                 = 134.2M params = 268 MB
+###   quantizing both saves 302 MB of re-read on EVERY decode step
+###
+### At the slice's ~500-600 GB/s that is 0.50-0.60 ms off a measured 4.07 ms
+### TPOT, i.e. roughly +4 ERS. Same mechanism as the fp8 weights that paid +13:
+### fewer bytes, native Hopper W8A8, zero dequantization tax. It is the only
+### lever class that has ever transferred to this portal.
+###
+### Why the earlier head-only attempt showed nothing
+### ------------------------------------------------
+### submit_033's self-test almost certainly REJECTED its own patch. Its gate was
+### `max relative error <= 0.02`, but FP8 e4m3 has three mantissa bits and 3-4%
+### per-element error is the format working correctly. Simulated against real
+### shapes, that bound fails on every layer for unstructured inputs. The portal
+### agrees: 033 (patched) TPOT 3.856 ms versus 029 (same nightly, unpatched)
+### 3.867 ms — identical. The -0.24 ms "gain" was only against 032, a slow run.
+###
+### The gate is now cosine >= 0.999 (signal), output norm ratio within 2%
+### (scale — the realistic kernel bug, verified to catch a deliberate 5% scale
+### error), and relative error <= 0.06 (loose outlier guard). Verified to pass
+### on in_proj, out_proj and lm_head shapes.
+###
+### Legality unchanged: quantization happens on the fly at startup from the
+### mounted BF16 weights, the form BTC sanctioned on 25/07. Originals stay
+### resident, so the tied input embedding lookup is bit-identical to stock and
+### every patch can fall back. No request-dependent branching.
+###
+### Grep the container log for `[lfm25]`: "fp8 linears: ACTIVE on 20 layers" and
+### "fp8 lm_head: ACTIVE" mean it is live; "REJECTED by self-test" means this run
+### equals a plain v0.25.1 control and its score says nothing about the lever.
+services:
+  model:
+    image: nguyenlong26/lfm25-custom-serve:v3-0251-fp8all
+    entrypoint:
+      - python3 #Don't change this to vllm-server
+      - -m  #Don't change this to vllm-server
+      - vllm.entrypoints.openai.api_server #Don't change this to vllm-server
+    command:
+      - --model=/model #Don't change this to vllm-server
+      - --served-model-name=LFM2.5-1.2B-Instruct #Don't change this to vllm-server
+      - --host=0.0.0.0 #Don't change this to vllm-server
+      - --port=8000 #Don't change this to vllm-server
+      - --max-model-len=32768
+      - --gpu-memory-utilization=0.95
+      - --tensor-parallel-size=1
+      - --enable-prefix-caching
+      - --quantization=fp8
+    ports:
+      - "8000:8000"
+    shm_size: "2g"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]

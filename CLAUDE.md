@@ -281,6 +281,38 @@ The other `-1` append (`gpu_model_runner.py:4786`) is inside `_pp_broadcast_prev
 
 Do not spend further slots or pod time on ngram, ngram_gpu, or on finding the duplication bug. **The `LFM25_FIX_ASYNC_SPEC` patch and the `v2-*-specfix` tags are retained but should not be submitted** — the patch fixes a genuine upstream bug that is inert for our workload, and it buys nothing on its own.
 
+### 26/07 profile — vLLM leaves 21 of 65 GEMMs in BF16. Biggest find of the round.
+
+`results_profile_20260726_175520`. **Caveat: the pod was UNCAPPED** (fresh pod, `pod_setup_h100.sh` not run, so no MPS) — a 132-SM H100 makes small kernels look cheaper than they are on the slice, so the *shares* are biased toward big GEMMs. The kernel *counts* are exact regardless, and they are what mattered.
+
+P1 (CUDA graphs, the real config) per decode step: **fp8/GEMM 69.9%**, unclassified 10.8%, copy/memset 6.7%, elementwise 5.1%, sampling 2.4%, rmsnorm 1.9%, shortconv 1.8%, attention 1.0%. **There is no hidden big kernel** — the "~150 small kernels" are genuinely small, which closes that search. But the GEMM breakdown does not match the config:
+
+| kernel | n/step | what it is |
+|---|---|---|
+| `cutlass_3x_gemm_sm90` (fp8) | **44** | 16 MLP ×2 + 6 attention ×2 |
+| `nvjet_sm90_tst_64x8…` (cuBLAS **BF16**) | **20** | **10 ShortConv ×2 — `in_proj` + `out_proj`** |
+| `nvjet_sm90_tst_512x8…` (cuBLAS **BF16**) | **1** | lm_head |
+
+**Confirmed in source, not inferred:** `ShortConv.__init__` (`vllm/model_executor/layers/mamba/short_conv.py`) **does not even accept a `quant_config`**, and `Lfm2ShortConvDecoderLayer` never passes one, so `in_proj` (`MergedColumnParallelLinear`) and `out_proj` (`RowParallelLinear`) always get `UnquantizedLinearMethod`. Together with the `ParallelLMHead` gap, **21 of 65 GEMMs run BF16 while `--quantization=fp8` is set**:
+
+| tensor | shape × count | params | BF16 |
+|---|---|---|---|
+| ShortConv `in_proj` | [6144, 2048] × 10 | 125.8M | 252 MB |
+| ShortConv `out_proj` | [2048, 2048] × 10 | 41.9M | 84 MB |
+| `lm_head` | [65536, 2048] | 134.2M | 268 MB |
+
+Quantizing all of it removes **302 MB of re-read per decode step** ⇒ 0.50–0.60ms at 500–600 GB/s ⇒ TPOT 4.07 → ~3.5ms ⇒ **≈ +4 ERS**. Same mechanism as the fp8 weights that paid +13.
+
+**This also revises the effective-bandwidth estimate.** The 018/020 pair measured Δ1.74ms for the bf16→fp8 switch; if only 0.868B (not 1.036B) params were actually being quantized, effective bandwidth is ~500 GB/s rather than 592. The "1% agreement" claimed earlier assumed both the param count and 600 GB/s, so it was two assumptions agreeing, not a confirmation.
+
+**submit_033's patch almost certainly self-rejected — the head result must be un-read.** Its gate was `max relative error ≤ 0.02`, but FP8 e4m3 has three mantissa bits and 3–4% per-element error *is the format working*. Simulated on real shapes, that bound fails on every layer for unstructured inputs. The portal agrees: 033 (patched nightly) TPOT **3.856** vs 029 (same nightly, unpatched) **3.867** — identical. The apparent −0.24ms was only against 032, a slow run. **Lesson: a patch that can silently disable itself is indistinguishable from a patch that does nothing, and the portal shows no logs. Always verify "ACTIVE" on a pod before spending a slot.**
+
+Gate rewritten and simulated against real shapes: cosine ≥ 0.999 (signal), **output norm ratio within 2%** (scale — the realistic kernel bug; verified to catch a deliberate 5% scale error), relative error ≤ 0.06 (loose outlier guard only). All three pass on `in_proj`, `out_proj` and `lm_head`.
+
+**Host vs GPU**: uncapped P1 showed GPU 1.30ms/step against host 2.14ms/step with wall clock 3.57 ≈ their sum, which looks CPU-bound — but that reading is an artifact twice over: the rig was uncapped (GPU work roughly doubles with the cap, while host stays constant) and `VLLM_ENABLE_V1_MULTIPROCESSING=0` serializes what production overlaps across the EngineCore process boundary. Treat host as second-order on the slice, not as the bottleneck.
+
+**Tags (v1/v2 frozen — already submitted):** `v3-0251-fp8all` (both gaps closed), `v3-0251-fp8conv` (ShortConv only), `v3-0251-fp8head` (head only, fixed gate). Submissions 036 (fp8all) / 037 (control) / 038 (fp8all rerun).
+
 - **Plan for the remaining slots (26–30/07)**. Stock-flag levers are closed, so slots now buy either portal information about code changes or best-of variance. **26/07, 5 slots in this order**: ① **031** 020 control (morning anchor) → ② **032** `lfm25-custom-serve:v1-n0ba2aa3`, patch inert (gate: proves the custom image serves under the harness, proves the layer is inert, replicates the nightly's +1.32) → ③ **033** `v1-n0ba2aa3-fp8head` → ④ **034** `v1-0251-fp8head` → ⑤ **035** 020 control (closing anchor). That is a 2×2 of {v0.25.1, nightly} × {stock, FP8 head} bracketed by two controls — the minimum that stays readable against ±4-point drift. **If 032 fails to serve, do not submit 033/034**; fall back to reruns of 031. Then: ⑥ record `config_hash` from every result page — the only signal separating drift from noise; ⑦ mirror any nightly finalist before locking the final-5 (already done for `0ba2aa3`); ⑧ ask BTC about median-vs-maximum scoring, the `tokens_per_sec` definition, and the long-context probe threshold. v0.23.0/v0.24.0 remain untested but are now a lower priority than the code track. Do not revisit any row in the closed-lever table above.
 
 **Where the next real lever would have to come from.** After the FP8 head the decode budget reads ≈1.73ms fp8 linears + 0.23ms fp8 head + ~1.9ms of small kernels. That ~1.9ms is now the largest term and nothing has ever measured *inside* it — it is inferred by subtraction, described as "roughly 150 small kernels on 16 SMs". Cross-rig arithmetic hints it splits into a fixed host-side component and an SM-bound component (4090 residual 1.17ms with 128 SMs vs the slice's 2.34ms with 16 ⇒ very roughly ~1.0ms host + ~1.3ms GPU), but that is a two-point extrapolation, not a measurement. **A profile of one decode step on the calibrated H100 rig is the only remaining way to find a lever bigger than +2**, and it is cheap. Do that before spending another session on any lever chosen by reasoning alone — the 26/07 spec-decode session is what that mistake costs.

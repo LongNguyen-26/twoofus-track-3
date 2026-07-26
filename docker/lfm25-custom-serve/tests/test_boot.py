@@ -95,7 +95,65 @@ results["finds_lm_head"] = len(lfm25_patches._candidate_heads(FakeModel())) == 1
 results["no_head_is_safe"] = lfm25_patches._candidate_heads(
     types.SimpleNamespace(named_modules=lambda: [])
 ) == []
-results["none_model_is_safe"] = lfm25_patches._patch_lm_head(None, lambda m: None) is None
+results["none_model_is_safe"] = not lfm25_patches._patch_lm_head(None, lambda m: None)
+results["none_model_linears_safe"] = not lfm25_patches._patch_linears(None, lambda m: None)
+
+
+# --- 4b. which layers _patch_linears selects -----------------------------
+# The real target is LFM2.5's ShortConv in_proj/out_proj, which vLLM builds
+# with no quant_config at all. Everything already quantized, every embedding,
+# and every tiny tensor must be left alone.
+class W:
+    def __init__(self, n, ndim=2):
+        self._n, self._ndim = n, ndim
+
+    def dim(self):
+        return self._ndim
+
+    def numel(self):
+        return self._n
+
+
+class QM:
+    def __init__(self, kind):
+        type(self).__name__ = kind  # not used; see Named below
+
+    def apply(self, layer, x, bias=None):
+        return None
+
+
+def qm(kind):
+    return type(kind, (), {"apply": lambda self, l, x, bias=None: None})()
+
+
+picked = []
+
+
+class SelectModel:
+    def named_modules(self):
+        return [
+            ("conv.in_proj", types.SimpleNamespace(
+                quant_method=qm("UnquantizedLinearMethod"), weight=W(6144 * 2048))),
+            ("conv.out_proj", types.SimpleNamespace(
+                quant_method=qm("UnquantizedLinearMethod"), weight=W(2048 * 2048))),
+            ("mlp.w1", types.SimpleNamespace(          # already fp8 -> skip
+                quant_method=qm("Fp8LinearMethod"), weight=W(8192 * 2048))),
+            ("tiny", types.SimpleNamespace(            # below threshold -> skip
+                quant_method=qm("UnquantizedLinearMethod"), weight=W(1024))),
+            ("norm", types.SimpleNamespace(            # 1-D -> skip
+                quant_method=qm("UnquantizedLinearMethod"), weight=W(2048, ndim=1))),
+        ]
+
+
+import lfm25_patches as _lp  # noqa: E402
+
+_real = _lp._quantize_one
+_lp._quantize_one = (lambda mod, label, log, act_quant, check_argmax:
+                     (picked.append(label), 1.0)[1])
+_lp._patch_linears(SelectModel(), lambda m: None, act_quant=object())
+_lp._quantize_one = _real
+results["selects_shortconv_only"] = picked == [
+    "fp8 linear conv.in_proj", "fp8 linear conv.out_proj"]
 
 # --- 5. missing defaults module and the kill switch ----------------------
 results["default_fallback"] = lfm25_boot._default("FP8_LMHEAD", False) is False

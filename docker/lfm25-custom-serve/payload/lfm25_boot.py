@@ -16,6 +16,9 @@ defaults baked into ``lfm25_defaults.py``:
 
     LFM25_PATCH=0           disable everything
     LFM25_FP8_LMHEAD=1      quantize the (BF16, untied-at-runtime) lm_head to FP8
+    LFM25_FP8_LINEARS=1     quantize Linear layers --quantization=fp8 skipped
+                            (LFM2.5's 10 ShortConv in_proj/out_proj pairs, which
+                            vLLM builds without a quant_config at all)
     LFM25_FIX_ASYNC_SPEC=1  repair vLLM's unrepaired optimistic speculative
                             decoding placeholders (only meaningful together
                             with --speculative-config method=ngram_gpu)
@@ -73,6 +76,7 @@ def _try_install():
 
         lfm25_patches.install(
             fp8_lmhead=_flag("LFM25_FP8_LMHEAD", "FP8_LMHEAD", False),
+            fp8_linears=_flag("LFM25_FP8_LINEARS", "FP8_LINEARS", False),
             fix_async_spec=_flag("LFM25_FIX_ASYNC_SPEC", "FIX_ASYNC_SPEC", False),
             log=_log,
         )

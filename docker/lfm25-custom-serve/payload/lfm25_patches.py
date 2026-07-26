@@ -50,8 +50,20 @@ or every token goes through stock BF16.
 
 import sys
 
+# FP8 e4m3 carries 3 mantissa bits, so 3-4% per-element error is the format
+# working correctly, not a broken kernel. The gates are therefore chosen to
+# catch the failure modes that actually matter:
+#   cosine       - signal preserved (a transposed or mis-scaled matmul collapses it)
+#   norm ratio   - overall scale correct; this is the tight one, because a wrong
+#                  scale factor is the realistic kernel bug and it moves norms
+#                  while leaving cosine near 1
+#   rel_err      - loose outlier guard only. An earlier 0.02 bound rejected the
+#                  patch on every layer for random inputs, whose unstructured
+#                  output makes the amax denominator small; that very likely
+#                  silently disabled the head patch in submit_033.
 _MIN_COSINE = 0.999
-_MAX_REL_ERR = 0.02
+_MAX_REL_ERR = 0.06
+_NORM_RATIO_TOL = 0.02
 _MIN_ARGMAX_AGREEMENT = 0.90
 
 
@@ -136,7 +148,7 @@ def _scaled_mm(xq, wq_t, xscale, wscale_row, bias, out_dtype):
 # --------------------------------------------------------------------------
 
 
-def _make_fp8_apply(qweight, scale, orig_apply, log, state):
+def _make_fp8_apply(qweight, scale, orig_apply, log, state, label="fp8"):
     import torch
 
     wq_t = qweight.t()  # [H, V], column-major view as _scaled_mm wants
@@ -155,17 +167,24 @@ def _make_fp8_apply(qweight, scale, orig_apply, log, state):
             return out.view(shape[:-1] + (out.shape[-1],))
         except Exception as exc:
             state["disabled"] = True
-            log("fp8 lm_head failed at runtime, reverted to BF16: %r" % (exc,))
+            log("%s failed at runtime, reverted to BF16: %r" % (label, exc))
             return orig_apply(layer, x, bias)
 
     return fp8_apply
 
 
-def _self_test(lm_head, fp8_apply, orig_apply, log):
-    """Compare against the stock BF16 head. Returns True if the patch may stay."""
+def _self_test(mod, fp8_apply, orig_apply, log, label="fp8", check_argmax=True):
+    """Compare against the stock BF16 path. True if the patch may stay.
+
+    Rows of the weight itself are used as one of the input batches: they are
+    well conditioned, they match the layer's own scale, and for the output head
+    they have a dominant argmax, which makes the argmax check meaningful.
+    `check_argmax` is off for ordinary linears, where the output is a hidden
+    state and its argmax carries no meaning.
+    """
     import torch
 
-    weight = lm_head.weight.data
+    weight = mod.weight.data
     device, dtype = weight.device, weight.dtype
     gen = torch.Generator(device="cpu").manual_seed(20260726)
     idx = torch.randint(0, weight.shape[0], (16,), generator=gen).to(device)
@@ -176,29 +195,34 @@ def _self_test(lm_head, fp8_apply, orig_apply, log):
     )
 
     for tag, hidden in (("rows", rows), ("random", noise), ("batch1", rows[:1])):
-        ref = orig_apply(lm_head, hidden, None)
-        got = fp8_apply(lm_head, hidden, None)
+        ref = orig_apply(mod, hidden, None)
+        got = fp8_apply(mod, hidden, None)
         if got is None or got.shape != ref.shape:
-            log("self-test %s: shape mismatch" % tag)
+            log("%s self-test %s: shape mismatch" % (label, tag))
             return False
         ref = ref.float()
         got = got.float()
         if not torch.isfinite(got).all():
-            log("self-test %s: non-finite logits" % tag)
+            log("%s self-test %s: non-finite output" % (label, tag))
             return False
         cosine = torch.nn.functional.cosine_similarity(ref, got, dim=-1).min().item()
         denom = ref.abs().amax().clamp(min=1e-6)
         rel_err = ((got - ref).abs().amax() / denom).item()
+        norm_ratio = (got.norm() / ref.norm().clamp(min=1e-6)).item()
         agreement = (ref.argmax(-1) == got.argmax(-1)).float().mean().item()
         log(
-            "self-test %s: cosine %.6f, max rel err %.4f, argmax agreement %.2f"
-            % (tag, cosine, rel_err, agreement)
+            "%s self-test %s: cosine %.6f, norm ratio %.4f, max rel err %.4f, "
+            "argmax agreement %.2f" % (label, tag, cosine, norm_ratio, rel_err,
+                                       agreement)
         )
-        if cosine < _MIN_COSINE or rel_err > _MAX_REL_ERR:
-            log("self-test %s: outside numerical bound" % tag)
+        if abs(norm_ratio - 1.0) > _NORM_RATIO_TOL:
+            log("%s self-test %s: output scale is wrong" % (label, tag))
             return False
-        if tag == "rows" and agreement < _MIN_ARGMAX_AGREEMENT:
-            log("self-test %s: argmax disagreement" % tag)
+        if cosine < _MIN_COSINE or rel_err > _MAX_REL_ERR:
+            log("%s self-test %s: outside numerical bound" % (label, tag))
+            return False
+        if check_argmax and tag == "rows" and agreement < _MIN_ARGMAX_AGREEMENT:
+            log("%s self-test %s: argmax disagreement" % (label, tag))
             return False
     return True
 
@@ -233,57 +257,118 @@ def _candidate_heads(model):
     return found
 
 
-def _patch_lm_head(model, log):
+def _quantize_one(mod, label, log, act_quant, check_argmax):
+    """Swap one unquantized BF16 linear/head for an FP8 one. Returns MB saved."""
     import torch
 
-    if model is None:
-        log("fp8 lm_head: no model on the runner")
-        return
-    heads = _candidate_heads(model)
-    if not heads:
-        log("fp8 lm_head: no lm_head found, leaving stock")
-        return
-    lm_head = heads[0]
-    weight = getattr(lm_head, "weight", None)
+    weight = getattr(mod, "weight", None)
     if weight is None or weight.dim() != 2:
-        log("fp8 lm_head: unexpected weight, leaving stock")
-        return
+        log("%s: unexpected weight, leaving stock" % label)
+        return 0.0
     if weight.dtype not in (torch.bfloat16, torch.float16):
-        log("fp8 lm_head: weight is %s, nothing to do" % (weight.dtype,))
-        return
-    quant_method = lm_head.quant_method
+        log("%s: weight is %s, nothing to do" % (label, weight.dtype))
+        return 0.0
+    quant_method = getattr(mod, "quant_method", None)
+    if quant_method is None:
+        log("%s: no quant_method, leaving stock" % label)
+        return 0.0
     orig_apply = quant_method.apply
     if getattr(orig_apply, "_lfm25_fp8", False):
-        return
+        return 0.0
 
-    rows, cols = weight.shape
-    saved = weight.data.numel() * weight.element_size() // 2
-    log("fp8 lm_head: quantizing %dx%d %s (saves %.0f MB per decode read)"
-        % (rows, cols, weight.dtype, saved / 1e6))
-
+    saved_mb = weight.numel() / 1e6  # BF16 -> FP8 saves one byte per element
     qweight, scale = _quantize_rowwise(weight.data)
-    state = {"disabled": False, "quant": _pick_act_quant(log)}
-    fp8_apply = _make_fp8_apply(qweight, scale, orig_apply, log, state)
+    state = {"disabled": False, "quant": act_quant}
+    fp8_apply = _make_fp8_apply(qweight, scale, orig_apply, log, state, label)
 
     ok = False
     try:
-        ok = _self_test(lm_head, fp8_apply, orig_apply, log)
+        ok = _self_test(mod, fp8_apply, orig_apply, log, label, check_argmax)
     except Exception as exc:
-        log("fp8 lm_head self-test raised: %r" % (exc,))
+        log("%s self-test raised: %r" % (label, exc))
     if not ok or state["disabled"]:
         del qweight, scale
         try:
             torch.cuda.empty_cache()
         except Exception:
             pass
-        log("fp8 lm_head: REJECTED by self-test, serving stock BF16")
-        return
+        log("%s: REJECTED by self-test, serving stock BF16" % label)
+        return 0.0
 
     fp8_apply._lfm25_fp8 = True
-    lm_head._lfm25_fp8_weight = qweight  # keep alive
-    lm_head._lfm25_fp8_scale = scale
+    mod._lfm25_fp8_weight = qweight  # keep alive; also keeps the BF16 fallback
+    mod._lfm25_fp8_scale = scale
     quant_method.apply = fp8_apply
-    log("fp8 lm_head: ACTIVE")
+    log("%s: ACTIVE (%dx%d, saves %.1f MB per decode read)"
+        % (label, weight.shape[0], weight.shape[1], saved_mb))
+    return saved_mb
+
+
+def _patch_lm_head(model, log, act_quant=None):
+    if model is None:
+        log("fp8 lm_head: no model on the runner")
+        return 0.0
+    heads = _candidate_heads(model)
+    if not heads:
+        log("fp8 lm_head: no lm_head found, leaving stock")
+        return 0.0
+    return _quantize_one(
+        heads[0], "fp8 lm_head", log,
+        act_quant or _pick_act_quant(log), check_argmax=True,
+    )
+
+
+def _patch_linears(model, log, act_quant=None, min_params=1_000_000):
+    """Quantize Linear modules that --quantization=fp8 silently skipped.
+
+    LFM2.5's ShortConv layers are the reason this exists. `ShortConv.__init__`
+    in vLLM does not even accept a `quant_config`, and builds its `in_proj`
+    (MergedColumnParallelLinear) and `out_proj` (RowParallelLinear) without one,
+    so they fall back to `UnquantizedLinearMethod` and stay BF16 no matter what
+    `--quantization` says. For this model that is 10 x [6144, 2048] plus
+    10 x [2048, 2048] = 167.8M parameters, 335 MB re-read every decode step --
+    larger than the lm_head, and about 8% of the model's parameters silently
+    running at twice the intended bandwidth.
+
+    Confirmed two ways before writing this: vLLM source, and a decode profile
+    that found exactly 44 cutlass FP8 GEMMs (16 MLP x2 + 6 attention x2) beside
+    exactly 20 cuBLAS BF16 GEMMs (10 ShortConv x2) per step.
+
+    Written generically rather than hardcoding ShortConv, so it also catches any
+    other layer the quant config misses.
+    """
+    if model is None:
+        log("fp8 linears: no model on the runner")
+        return 0.0
+    act_quant = act_quant or _pick_act_quant(log)
+    total = 0.0
+    count = 0
+    try:
+        modules = list(model.named_modules())
+    except Exception as exc:
+        log("fp8 linears: cannot walk the model: %r" % (exc,))
+        return 0.0
+    for name, mod in modules:
+        cls = type(mod).__name__
+        if "Embedding" in cls or "LMHead" in cls:
+            continue  # the head has its own flag; embedding lookup needs BF16
+        quant_method = getattr(mod, "quant_method", None)
+        if quant_method is None or "Unquantized" not in type(quant_method).__name__:
+            continue
+        weight = getattr(mod, "weight", None)
+        if weight is None or weight.dim() != 2 or weight.numel() < min_params:
+            continue
+        saved = _quantize_one(mod, "fp8 linear %s" % name, log, act_quant,
+                              check_argmax=False)
+        if saved:
+            total += saved
+            count += 1
+    if count:
+        log("fp8 linears: ACTIVE on %d layers, %.1f MB less read per decode step"
+            % (count, total))
+    else:
+        log("fp8 linears: nothing left unquantized")
+    return total
 
 
 # ==========================================================================
@@ -416,9 +501,9 @@ def _install_async_spec_fix(log):
 # --------------------------------------------------------------------------
 
 
-def install(fp8_lmhead=False, fix_async_spec=False, log=None):
+def install(fp8_lmhead=False, fp8_linears=False, fix_async_spec=False, log=None):
     log = log or _noop
-    if not fp8_lmhead and not fix_async_spec:
+    if not fp8_lmhead and not fp8_linears and not fix_async_spec:
         log("no patches enabled, stock vLLM")
         return
 
@@ -428,7 +513,7 @@ def install(fp8_lmhead=False, fix_async_spec=False, log=None):
         except Exception as exc:
             log("async spec fix skipped: %r" % (exc,))
 
-    if not fp8_lmhead:
+    if not fp8_lmhead and not fp8_linears:
         return
 
     module = sys.modules.get("vllm.v1.worker.gpu_model_runner")
@@ -442,12 +527,27 @@ def install(fp8_lmhead=False, fix_async_spec=False, log=None):
 
     def load_model(self, *args, **kwargs):
         result = orig_load(self, *args, **kwargs)
+        model = getattr(self, "model", None)
+        # One activation quantizer probe shared by every patched layer.
+        act_quant = None
         try:
-            _patch_lm_head(getattr(self, "model", None), log)
+            act_quant = _pick_act_quant(log)
         except Exception as exc:
-            log("fp8 lm_head skipped: %r" % (exc,))
+            log("activation quant probe failed: %r" % (exc,))
+        if fp8_linears:
+            try:
+                _patch_linears(model, log, act_quant)
+            except Exception as exc:
+                log("fp8 linears skipped: %r" % (exc,))
+        if fp8_lmhead:
+            try:
+                _patch_lm_head(model, log, act_quant)
+            except Exception as exc:
+                log("fp8 lm_head skipped: %r" % (exc,))
         return result
 
     load_model._lfm25_wrapped = True
     runner_cls.load_model = load_model
-    log("armed: fp8 lm_head (applies after model load)")
+    log("armed: %s (applies after model load)"
+        % ", ".join(n for n, on in (("fp8 linears", fp8_linears),
+                                    ("fp8 lm_head", fp8_lmhead)) if on))
