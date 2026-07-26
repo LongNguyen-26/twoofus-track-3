@@ -313,6 +313,29 @@ Gate rewritten and simulated against real shapes: cosine ≥ 0.999 (signal), **o
 
 **Tags (v1/v2 frozen — already submitted):** `v3-0251-fp8all` (both gaps closed), `v3-0251-fp8conv` (ShortConv only), `v3-0251-fp8head` (head only, fixed gate). Submissions 036 (fp8all) / 037 (control) / 038 (fp8all rerun).
 
+### 27/07 — the patches never ran. A boot-shim race, found by the pod, fixed.
+
+Portal: **034** (v1 fp8head) TPOT **4.142**, **036** (v3 fp8all) **4.156**, **037** control **4.172**, against a six-run control mean of **4.140 ± 0.106**. 036 sat +0.15σ from the mean. Not a small effect — none.
+
+The pod said why, from the engine process:
+
+```
+=== F1 (patch=1) ===
+(EngineCore pid=2838) [lfm25] GPUModelRunner not found, stock vLLM
+```
+
+**Python publishes a module in `sys.modules` before executing its body.** While `vllm.v1.worker.gpu_model_runner` was running its own imports, each one ticked the shim's generic meta-path finder; the finder saw the target in `sys.modules`, latched `installed = True`, and called `install()` before `class GPUModelRunner` existed. install() logged and returned — and the latch then permanently skipped the *deterministic* post-`exec_module` hook, which fires at exactly the right moment. **The belt-and-braces fallback disabled the mechanism it was added to protect.**
+
+Fix: the tick requires the class to exist before latching, so an early tick is a no-op that retries. `tests/test_boot.py` now reproduces it — the stand-in `gpu_model_runner` imports a local module as its first statement, which is what ticks the finder mid-execution; without the guard the test emits that exact log line and fails, with it passes. A stdlib import does not work as the trigger: it is usually preloaded, so `find_spec` is never called and the test goes vacuous.
+
+**Consequences for the record: submit_033, 034 and 036 tested nothing.** No FP8 quantization ever ran in any of them. They are five more control measurements, nothing else. Every "the patch did/didn't help" reading from 033 onward is void — including the 26/07 note above that already downgraded 033; the reason was right in outcome, wrong in mechanism (the self-test gate was indeed too tight and is still worth having fixed, but it was never even reached).
+
+**Method lesson, the expensive one of this round:** a patch that can silently no-op is indistinguishable from a patch that does nothing, and the portal returns no logs. Three slots bought "no change" with no diagnosis; twenty minutes of pod time bought the exact cause. **Verify ACTIVE on a pod before spending a slot on any mechanism.** The check scripts now assert on it explicitly.
+
+Prize re-estimated from the profile rather than byte counts: ShortConv's 20 BF16 GEMMs are 13.7% of GPU kernel time, the lm_head 6.9%, so halving both is worth ~0.29ms of 4.07ms ⇒ **≈ +2.1 ERS**, not the +4 that pure byte accounting implied.
+
+Tags `v4-0251-{fp8all,fp8conv,fp8head}` carry the fix; v1/v2/v3 are frozen (v3 submitted as 036). Submission 039 is 036's config on `v4-0251-fp8all`, gated on a pod run first.
+
 - **Plan for the remaining slots (26–30/07)**. Stock-flag levers are closed, so slots now buy either portal information about code changes or best-of variance. **26/07, 5 slots in this order**: ① **031** 020 control (morning anchor) → ② **032** `lfm25-custom-serve:v1-n0ba2aa3`, patch inert (gate: proves the custom image serves under the harness, proves the layer is inert, replicates the nightly's +1.32) → ③ **033** `v1-n0ba2aa3-fp8head` → ④ **034** `v1-0251-fp8head` → ⑤ **035** 020 control (closing anchor). That is a 2×2 of {v0.25.1, nightly} × {stock, FP8 head} bracketed by two controls — the minimum that stays readable against ±4-point drift. **If 032 fails to serve, do not submit 033/034**; fall back to reruns of 031. Then: ⑥ record `config_hash` from every result page — the only signal separating drift from noise; ⑦ mirror any nightly finalist before locking the final-5 (already done for `0ba2aa3`); ⑧ ask BTC about median-vs-maximum scoring, the `tokens_per_sec` definition, and the long-context probe threshold. v0.23.0/v0.24.0 remain untested but are now a lower priority than the code track. Do not revisit any row in the closed-lever table above.
 
 **Where the next real lever would have to come from.** After the FP8 head the decode budget reads ≈1.73ms fp8 linears + 0.23ms fp8 head + ~1.9ms of small kernels. That ~1.9ms is now the largest term and nothing has ever measured *inside* it — it is inferred by subtraction, described as "roughly 150 small kernels on 16 SMs". Cross-rig arithmetic hints it splits into a fixed host-side component and an SM-bound component (4090 residual 1.17ms with 128 SMs vs the slice's 2.34ms with 16 ⇒ very roughly ~1.0ms host + ~1.3ms GPU), but that is a two-point extrapolation, not a measurement. **A profile of one decode step on the calibrated H100 rig is the only remaining way to find a lever bigger than +2**, and it is cheap. Do that before spending another session on any lever chosen by reasoning alone — the 26/07 spec-decode session is what that mistake costs.

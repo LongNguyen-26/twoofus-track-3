@@ -62,14 +62,23 @@ def _enabled():
 
 
 def _try_install():
-    """Apply patches if their target modules are loaded. Cheap and idempotent."""
+    """Apply patches once the target module is fully executed. Idempotent."""
     if _state["installed"]:
         return
-    if _TARGET not in sys.modules:
+    module = sys.modules.get(_TARGET)
+    if module is None:
+        return
+    # Python publishes a module in sys.modules BEFORE running its body, so the
+    # generic import tick fires while `class GPUModelRunner` has not been
+    # executed yet. Latching on that attempt is what silently disabled every
+    # patch on 26-27/07: install() logged "GPUModelRunner not found", set
+    # installed=True, and the deterministic post-exec hook was then skipped.
+    # Requiring the attribute makes an early tick a no-op that retries later.
+    if getattr(module, "GPUModelRunner", None) is None:
         return
     # Deliberately left on sys.meta_path: removing an entry while the import
-    # system is iterating it makes the loop skip the next finder. The guard
-    # above is one dict lookup per import, which is not worth that risk.
+    # system is iterating it makes the loop skip the next finder. The guards
+    # above are two dict lookups per import, which is not worth that risk.
     _state["installed"] = True
     try:
         import lfm25_patches

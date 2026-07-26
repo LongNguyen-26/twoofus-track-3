@@ -1,0 +1,63 @@
+### submit_039 — submit_036's config on the image where the patch actually runs.
+###
+### Image: nguyenlong26/lfm25-custom-serve:v4-0251-fp8all
+###
+### 036 scored 60.93 / TPOT 4.156 against a control mean of 4.140 — no effect at
+### all. A pod run then printed the reason, from the engine process:
+###
+###     [lfm25] GPUModelRunner not found, stock vLLM
+###
+### The bug was in the boot shim, not in the quantization. Python publishes a
+### module in `sys.modules` BEFORE executing its body, so while
+### `vllm.v1.worker.gpu_model_runner` was still running its own imports, each of
+### those imports ticked the shim's generic meta-path finder. The finder saw the
+### target present, latched `installed = True`, and called install() at a moment
+### when `class GPUModelRunner` had not been defined yet. install() logged and
+### returned, and because the latch was already set, the deterministic
+### post-execution hook — which fires at exactly the right time — was skipped
+### forever. The belt-and-braces fallback disabled the mechanism it was meant to
+### protect.
+###
+### Fix: the tick now requires the class to exist before latching, so an early
+### tick is a no-op that retries. Covered by a regression test that reproduces
+### the exact log line above without the fix and passes with it.
+###
+### This makes submit_033, submit_034 and submit_036 all meaningless as tests of
+### FP8 quantization: none of them ever ran the patch. What they did establish,
+### usefully, is a five-run control band for this harness.
+###
+### Prize, re-estimated from the decode profile rather than byte counts alone:
+### ShortConv's 20 BF16 GEMMs are 13.7% of GPU kernel time and the lm_head 6.9%,
+### so halving both is worth roughly 0.29 ms of a 4.07 ms TPOT — about +2.1 ERS,
+### not the +4 the pure byte accounting suggested.
+###
+### Do not submit this until a pod run shows "fp8 linears: ACTIVE on 20 layers"
+### and "fp8 lm_head: ACTIVE", and shows local TPOT dropping. That check costs
+### twenty minutes; three slots have already been spent on an unverified patch.
+services:
+  model:
+    image: nguyenlong26/lfm25-custom-serve:v4-0251-fp8all
+    entrypoint:
+      - python3 #Don't change this to vllm-server
+      - -m  #Don't change this to vllm-server
+      - vllm.entrypoints.openai.api_server #Don't change this to vllm-server
+    command:
+      - --model=/model #Don't change this to vllm-server
+      - --served-model-name=LFM2.5-1.2B-Instruct #Don't change this to vllm-server
+      - --host=0.0.0.0 #Don't change this to vllm-server
+      - --port=8000 #Don't change this to vllm-server
+      - --max-model-len=32768
+      - --gpu-memory-utilization=0.95
+      - --tensor-parallel-size=1
+      - --enable-prefix-caching
+      - --quantization=fp8
+    ports:
+      - "8000:8000"
+    shm_size: "2g"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]

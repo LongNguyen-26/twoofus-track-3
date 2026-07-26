@@ -25,7 +25,15 @@ pkg = root / "vllm" / "v1" / "worker"
 pkg.mkdir(parents=True)
 for level in (root / "vllm", root / "vllm" / "v1", pkg):
     (level / "__init__.py").write_text("")
+(pkg / "_dummy_dep.py").write_text("VALUE = 1\n")
 (pkg / "gpu_model_runner.py").write_text(
+    # This import comes FIRST on purpose, and targets a module guaranteed not
+    # to already be in sys.modules (a stdlib name is often preloaded, which
+    # skips find_spec entirely and makes the test vacuous). Python publishes a
+    # module in sys.modules BEFORE running its body, so this line ticks the
+    # meta-path finder while GPUModelRunner does not exist yet -- the exact
+    # race that silently disabled every patch on 26-27/07.
+    "from . import _dummy_dep\n"
     "class GPUModelRunner:\n"
     "    def load_model(self, *a, **kw):\n"
     "        self.model = None\n"
@@ -51,6 +59,9 @@ results["stdlib_import_ok"] = colorsys.rgb_to_hls(0, 0, 0) == (0, 0, 0)
 import vllm.v1.worker.gpu_model_runner as gmr  # noqa: E402
 
 results["installed_on_target_import"] = lfm25_boot._state["installed"] is True
+# The regression itself: an early tick must not latch and lock out the real hook.
+results["survived_midimport_tick"] = getattr(
+    gmr.GPUModelRunner.load_model, "_lfm25_wrapped", False)
 results["load_model_wrapped"] = getattr(gmr.GPUModelRunner.load_model, "_lfm25_wrapped", False)
 results["finder_still_present"] = lfm25_boot._state["trigger"] in sys.meta_path
 
