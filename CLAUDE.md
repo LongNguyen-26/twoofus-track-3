@@ -364,6 +364,34 @@ Portal projection at its calibrated 500–592 GB/s: **head alone +1.7 to +2.0 ER
 
 **FP8_LINEARS still untested — `install_payload` in the check script only ever wrote `FP8_LMHEAD`.** The earlier fix to that script never applied: the working copy has CRLF line endings and the scripted replacement matched on `\n`. Fixed properly, and the script now asserts on *both* patches being ACTIVE. **Editing a CRLF working-copy file with `\n`-anchored string replacement silently no-ops — use the file-aware editor, and always re-read the file to confirm.**
 
+### 27/07 — **submit_039 is the first code-level win of the round. TPOT is settled.**
+
+**Portal: submit_039 (`v4-0251-fp8all`) ERS 61.98, TTFT p50 54, failed 6 ⇒ TPOT 3.827ms.** Against the six-run control mean of 4.140 ± 0.106 that is **−0.313ms, 2.96σ below**, and below every control measurement ever taken. Worth a flat **+2.29 ERS at any TTFT**.
+
+Pod confirmation the same hour (F1 both patches vs F2 control, capped 12%):
+
+| | control | patched | Δ |
+|---|---|---|---|
+| fresh | 7.83 | **7.31** | **−0.52ms** |
+| shared | 6.83 | **6.49** | **−0.34ms** |
+
+**18 of 20 ShortConv projections went ACTIVE** plus the lm_head — `fp8 linears: ACTIVE on 18 layers, 159.4 MB less read per decode step` and `fp8 lm_head: ACTIVE … 134.2 MB` = 293.6 MB/step. Needle 2/5 unchanged, coherence sample clean (wording differs slightly, which is expected from quantization and reads correctly).
+
+The two rejections were `layers.7.short_conv.out_proj` (rel err 0.0688) and `layers.9.short_conv.out_proj` (0.0605), both marginally over the 0.06 bound on the noisy `random` case while their cosine and norm ratio were indistinguishable from the 18 that passed. Recovering them is 8.4 MB ≈ +0.06 ERS — **not worth loosening a numerical gate for.** Per-layer fail-open worked exactly as designed.
+
+**TPOT is now settled and no longer worth slots.** What remains is TTFT, which we neither control nor predict: identical configurations have returned p50 anywhere from 42 to 65ms. With TPOT banked at 3.827:
+
+| TTFT p50 | score |
+|---|---|
+| 42 | **64.7** |
+| 48 | 63.3 |
+| 54 | 62.0 (what 039 drew) |
+| 60 | 60.7 |
+
+The standing best is 63.08, so a 42–48ms draw beats it. **Every remaining slot is a draw on TTFT with the TPOT term already banked** — resubmit `submissions/round_2/submit_040` (identical to 039) for each one; repeat submissions do not need new directories.
+
+Rejected as not worth a slot at this operating point: the nightly base (−0.2ms TPOT ≈ +1.5, but +3 to +13ms TTFT ≈ −0.7 to −3.0, net negative); fp8 KV (measured regression, submit_021); the two rejected layers.
+
 - **Plan for the remaining slots (26–30/07)**. Stock-flag levers are closed, so slots now buy either portal information about code changes or best-of variance. **26/07, 5 slots in this order**: ① **031** 020 control (morning anchor) → ② **032** `lfm25-custom-serve:v1-n0ba2aa3`, patch inert (gate: proves the custom image serves under the harness, proves the layer is inert, replicates the nightly's +1.32) → ③ **033** `v1-n0ba2aa3-fp8head` → ④ **034** `v1-0251-fp8head` → ⑤ **035** 020 control (closing anchor). That is a 2×2 of {v0.25.1, nightly} × {stock, FP8 head} bracketed by two controls — the minimum that stays readable against ±4-point drift. **If 032 fails to serve, do not submit 033/034**; fall back to reruns of 031. Then: ⑥ record `config_hash` from every result page — the only signal separating drift from noise; ⑦ mirror any nightly finalist before locking the final-5 (already done for `0ba2aa3`); ⑧ ask BTC about median-vs-maximum scoring, the `tokens_per_sec` definition, and the long-context probe threshold. v0.23.0/v0.24.0 remain untested but are now a lower priority than the code track. Do not revisit any row in the closed-lever table above.
 
 **Where the next real lever would have to come from.** After the FP8 head the decode budget reads ≈1.73ms fp8 linears + 0.23ms fp8 head + ~1.9ms of small kernels. That ~1.9ms is now the largest term and nothing has ever measured *inside* it — it is inferred by subtraction, described as "roughly 150 small kernels on 16 SMs". Cross-rig arithmetic hints it splits into a fixed host-side component and an SM-bound component (4090 residual 1.17ms with 128 SMs vs the slice's 2.34ms with 16 ⇒ very roughly ~1.0ms host + ~1.3ms GPU), but that is a two-point extrapolation, not a measurement. **A profile of one decode step on the calibrated H100 rig is the only remaining way to find a lever bigger than +2**, and it is cheap. Do that before spending another session on any lever chosen by reasoning alone — the 26/07 spec-decode session is what that mistake costs.

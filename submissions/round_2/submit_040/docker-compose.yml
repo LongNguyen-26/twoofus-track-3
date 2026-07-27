@@ -1,0 +1,61 @@
+### submit_040 — the harvest configuration. Identical to submit_039.
+###
+### RESUBMIT THIS FILE FOR EVERY REMAINING SLOT. It does not need a new
+### directory each time; the repo records the configuration once and the portal
+### records each attempt.
+###
+### Why harvesting is now the right use of the remaining slots
+### ---------------------------------------------------------
+### submit_039 measured TPOT 3.827 ms against a six-run control mean of
+### 4.140 +/- 0.106 — 2.96 sigma below, and below every control run ever taken.
+### The pod agrees: 18 of 20 ShortConv projections plus the lm_head went ACTIVE,
+### 293.6 MB less read per decode step, TPOT -0.52 ms fresh and -0.34 ms shared
+### against a same-session control.
+###
+### That is worth a flat +2.29 ERS at any TTFT. TPOT is now settled and is not
+### worth more slots.
+###
+### What is left is TTFT, which we do not control and cannot predict. Identical
+### configurations have returned TTFT p50 anywhere from 42 to 65 ms, and the
+### leaderboard keeps the maximum:
+###
+###     TTFT 42 -> 64.7      TTFT 54 -> 62.0
+###     TTFT 48 -> 63.3      TTFT 60 -> 60.7
+###
+### submit_039 drew 54 ms and scored 61.98. The same bytes on a 42 ms draw score
+### 64.7, comfortably past the standing best of 63.08. So every remaining slot is
+### a draw on TTFT with the TPOT term already banked.
+###
+### Levers deliberately NOT taken, with reasons:
+###   * the two rejected out_proj layers (7 and 9) would add 8.4 MB, about
+###     +0.06 ERS — not worth loosening a numerical gate for;
+###   * the nightly base buys roughly -0.2 ms TPOT (+1.5) but costs +3 to +13 ms
+###     TTFT (-0.7 to -3.0) — net negative at this operating point;
+###   * fp8 KV cache was measured as a regression on the real slice (submit_021).
+services:
+  model:
+    image: nguyenlong26/lfm25-custom-serve:v4-0251-fp8all
+    entrypoint:
+      - python3 #Don't change this to vllm-server
+      - -m  #Don't change this to vllm-server
+      - vllm.entrypoints.openai.api_server #Don't change this to vllm-server
+    command:
+      - --model=/model #Don't change this to vllm-server
+      - --served-model-name=LFM2.5-1.2B-Instruct #Don't change this to vllm-server
+      - --host=0.0.0.0 #Don't change this to vllm-server
+      - --port=8000 #Don't change this to vllm-server
+      - --max-model-len=32768
+      - --gpu-memory-utilization=0.95
+      - --tensor-parallel-size=1
+      - --enable-prefix-caching
+      - --quantization=fp8
+    ports:
+      - "8000:8000"
+    shm_size: "2g"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
