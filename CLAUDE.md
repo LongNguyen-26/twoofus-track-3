@@ -390,6 +390,20 @@ The two rejections were `layers.7.short_conv.out_proj` (rel err 0.0688) and `lay
 
 The standing best is 63.08, so a 42–48ms draw beats it. **Every remaining slot is a draw on TTFT with the TPOT term already banked** — resubmit `submissions/round_2/submit_040` (identical to 039) for each one; repeat submissions do not need new directories.
 
+**Replicated (submit_040, 27/07 10:14): ERS 62.35, TTFT p50 53, failed 5 ⇒ TPOT 3.827ms — identical to 039's 3.827 to three decimals**, nine hours apart. The patched configuration is now n=2 with essentially zero spread, against a control baseline of 4.140 ± 0.106 (n=6). The 0.312ms gap is settled; nothing about TPOT is worth another slot.
+
+**Harvest arithmetic, using this harness era's own TTFT draws** (48, 49, 50, 52, 53, 54, 54, 57, 65 — median 53, min 48; the 42ms of 18/07 belongs to an older harness and should not be planned around):
+
+| TTFT draw | score at TPOT 3.828 |
+|---|---|
+| 44 | 64.40 |
+| 46 | 63.94 |
+| **48** | **63.48** ← beats 63.08 |
+| 50 | 63.02 |
+| 53 | 62.35 (what 040 drew) |
+
+Beating the standing best needs **TTFT ≤ 49**, seen in 2 of 9 draws (p ≈ 0.22). Over the 15 slots left on 28–30/07 that is a **98% chance of at least one**, with the likely new best landing around 63.5–64.0. Note this also means the ceiling for this round is ~64: no remaining mechanism moves TTFT, and TPOT is done.
+
 Rejected as not worth a slot at this operating point: the nightly base (−0.2ms TPOT ≈ +1.5, but +3 to +13ms TTFT ≈ −0.7 to −3.0, net negative); fp8 KV (measured regression, submit_021); the two rejected layers.
 
 - **Plan for the remaining slots (26–30/07)**. Stock-flag levers are closed, so slots now buy either portal information about code changes or best-of variance. **26/07, 5 slots in this order**: ① **031** 020 control (morning anchor) → ② **032** `lfm25-custom-serve:v1-n0ba2aa3`, patch inert (gate: proves the custom image serves under the harness, proves the layer is inert, replicates the nightly's +1.32) → ③ **033** `v1-n0ba2aa3-fp8head` → ④ **034** `v1-0251-fp8head` → ⑤ **035** 020 control (closing anchor). That is a 2×2 of {v0.25.1, nightly} × {stock, FP8 head} bracketed by two controls — the minimum that stays readable against ±4-point drift. **If 032 fails to serve, do not submit 033/034**; fall back to reruns of 031. Then: ⑥ record `config_hash` from every result page — the only signal separating drift from noise; ⑦ mirror any nightly finalist before locking the final-5 (already done for `0ba2aa3`); ⑧ ask BTC about median-vs-maximum scoring, the `tokens_per_sec` definition, and the long-context probe threshold. v0.23.0/v0.24.0 remain untested but are now a lower priority than the code track. Do not revisit any row in the closed-lever table above.
